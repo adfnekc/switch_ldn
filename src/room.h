@@ -32,7 +32,14 @@
 #define ROOM_DEFAULT_PORT 24872u
 #define ROOM_NETWORK_VERSION 1u
 #define ROOM_MAX_MEMBERS 16
-#define ROOM_MAX_MESSAGE_SIZE 500 /* Eden's MaxMessageSize */
+/*
+ * NOTE: Network::MaxMessageSize in Eden is 500, but it is only ever applied to
+ * chat message text (room.cpp clamps the string before writing it). It is not a
+ * datagram limit: Eden's own BroadcastRoomInformation() serialises every member
+ * with no size check at all, and a full room does not fit in 500 bytes. So the
+ * bridge sizes its serialiser for the real worst case (see Packet in room.c)
+ * instead of enforcing 500 here.
+ */
 
 typedef enum RoomMessageTypes : uint8_t {
     IdJoinRequest = 1,

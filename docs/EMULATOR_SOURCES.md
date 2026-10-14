@@ -59,3 +59,8 @@ Cloned directly; no workaround needed.
 plus the real transport and LDN-core objects, so it runs the identical code path
 as `./switch_ldn` minus hostapd and frame injection. That is exactly the surface
 an emulator peer talks to, so interop can be tested without radio hardware.
+
+The Eden/Yuzu side needs one patch to be useful for testing, because stock Eden
+throws the LDN passphrase away. See [EDEN_PATCH.md](EDEN_PATCH.md) for what it
+changes, why it stays wire-compatible, and how to verify it with
+`scripts/build_eden.sh`.

@@ -38,11 +38,21 @@ struct RoomServer {
 /* ------------------------------------------------------------------ */
 
 typedef struct {
-    uint8_t buf[2048];
+    /*
+     * Sized for a full 16-member RoomInformation broadcast, not for one
+     * message: every member carries nickname + fake IP + game name/id/version +
+     * username + display name + avatar url, which is ~708 bytes with those
+     * fields at their maximum length (see RoomMemberInfo / RoomGameInfo in
+     * room.h). A 16-member room needs ~11.9 KB, so anything smaller than this
+     * silently truncates the member list - see room_broadcast_information().
+     */
+    uint8_t buf[12288];
     size_t len;
     size_t pos;
     bool ok;
 } Packet;
+
+#define PACKET_BUFSIZE sizeof(((Packet *)0)->buf)
 
 static void pk_begin(Packet *p)
 {
@@ -255,10 +265,6 @@ const RoomMemberInfo *room_server_members(const RoomServer *server, size_t *coun
 
 static void send_to(RoomServer *s, MemberSlot *m, const uint8_t *buf, size_t len)
 {
-    if (len > ROOM_MAX_MESSAGE_SIZE) {
-        LOG_E("room: packet of %zu bytes exceeds Eden's MaxMessageSize (%d)", len,
-              ROOM_MAX_MESSAGE_SIZE);
-    }
     if (sendto(s->fd, buf, len, 0, (const struct sockaddr *)&m->addr, m->addr_len) < 0) {
         LOG_E("room: sendto member %d failed: %s", m->info.id, strerror(errno));
     }
@@ -340,6 +346,19 @@ void room_broadcast_information(RoomServer *server)
         pk_str(&p, m->username);
         pk_str(&p, m->display_name);
         pk_str(&p, m->avatar_url);
+    }
+
+    /*
+     * The pk_* helpers stop growing the buffer and set ok=false once a field
+     * would not fit. Without this check the datagram would go out truncated
+     * and the emulator would decode a partial member list - exactly the kind
+     * of silent failure this file is supposed to avoid.
+     */
+    if (!p.ok) {
+        LOG_E("room: RoomInformation does not fit in %zu bytes (%u members); "
+              "not sending a truncated room list",
+              PACKET_BUFSIZE, server->member_count);
+        return;
     }
 
     for (int i = 0; i < ROOM_MAX_MEMBERS; i++) {

@@ -19,6 +19,21 @@
 
 static const uint16_t PORT = 47913;
 
+/*
+ * Bounds-checked walk of a big-endian, u32-length-prefixed string field.
+ * The serialiser used to truncate silently, so a walk that trusts the lengths
+ * on the wire would read past the end of the datagram; assert instead.
+ */
+static size_t walk_str(const uint8_t *buf, size_t total, size_t *off)
+{
+    assert(*off + 4 <= total);
+    size_t n = rd_be32(buf + *off);
+    *off += 4;
+    assert(*off + n <= total);
+    *off += n;
+    return n;
+}
+
 static uint32_t g_joins = 0;
 static uint32_t g_packets = 0;
 static uint8_t g_first_fake_ip[4] = {0xFF, 0xFF, 0xFF, 0xFF};
@@ -150,7 +165,12 @@ int main(void)
     /* ---- constants that must match Eden exactly ---- */
     assert(ROOM_NETWORK_VERSION == 1);
     assert(ROOM_DEFAULT_PORT == 24872);
-    assert(ROOM_MAX_MESSAGE_SIZE == 500);
+    /*
+     * NOTE: Network::MaxMessageSize == 500 in Eden, but it is *not* asserted
+     * here because it is a chat-message limit, not a datagram limit. Eden's own
+     * BroadcastRoomInformation() writes a full member list with no size check
+     * at all; see the "full room" section below.
+     */
     assert(IdJoinRequest == 1 && IdJoinSuccess == 2 && IdRoomInformation == 3 &&
            IdSetGameInfo == 4 && IdProxyPacket == 5 && IdLdnPacket == 6);
     assert(LDNPacketTypeScan == 0 && LDNPacketTypeScanResp == 1 &&
@@ -199,7 +219,7 @@ int main(void)
     }
     room_server_poll(server, 0);
 
-    uint8_t resp[2048];
+    uint8_t resp[16384];
     ssize_t n = drain(udp, server, resp, sizeof(resp));
     if (n < 0) {
         fprintf(stderr, "no reply to IdJoinRequest\n");
@@ -387,36 +407,54 @@ int main(void)
     assert(resp[0] == IdRoomInformation);
 
     size_t off = 1;
-    uint32_t name_len = rd_be32(resp + off);
+    assert(walk_str(resp, (size_t)n, &off) == strlen("TestRoom"));
+    assert(memcmp(resp + off - strlen("TestRoom"), "TestRoom", strlen("TestRoom")) == 0);
+
+    size_t desc_len = walk_str(resp, (size_t)n, &off);
+    (void)desc_len;
+
+    uint32_t slots = 0;
+    uint16_t port = 0;
+    uint32_t members = 0;
+    assert(off + 4 <= (size_t)n);
+    slots = rd_be32(resp + off);
     off += 4;
-    assert(name_len == strlen("TestRoom"));
-    assert(memcmp(resp + off, "TestRoom", name_len) == 0);
-    off += name_len;
-
-    uint32_t desc_len = rd_be32(resp + off);
-    off += 4 + desc_len;
-
-    uint32_t slots = rd_be32(resp + off);
-    off += 4;
-    assert(slots == LDN_NODE_MAX);
-
-    uint16_t port = rd_be16(resp + off);
+    assert(off + 2 <= (size_t)n);
+    port = rd_be16(resp + off);
     off += 2;
-    assert(port == PORT);
 
-    uint32_t game_len = rd_be32(resp + off);
-    off += 4 + game_len;
+    walk_str(resp, (size_t)n, &off); /* preferred_game.name */
+    walk_str(resp, (size_t)n, &off); /* host_username */
 
-    uint32_t host_len = rd_be32(resp + off);
-    off += 4 + host_len;
-
-    uint32_t members = rd_be32(resp + off);
+    assert(off + 4 <= (size_t)n);
+    members = rd_be32(resp + off);
     off += 4;
     assert(members == 2);
     printf("IdRoomInformation: name='%s' slots=%u port=%u members=%u\n", "TestRoom",
            slots, port, members);
 
+    /*
+     * Walk the members field by field. If the serialiser dropped or
+     * duplicated anything the walk will not land exactly on the end of the
+     * datagram, so this is the truncation tripwire.
+     */
+    for (uint32_t i = 0; i < members; i++) {
+        walk_str(resp, (size_t)n, &off); /* nickname */
+        assert(off + 4 <= (size_t)n);
+        off += 4; /* fake_ip */
+        walk_str(resp, (size_t)n, &off); /* game name */
+        assert(off + 8 <= (size_t)n);
+        off += 8; /* game id */
+        walk_str(resp, (size_t)n, &off); /* game version */
+        walk_str(resp, (size_t)n, &off); /* username */
+        walk_str(resp, (size_t)n, &off); /* display_name */
+        walk_str(resp, (size_t)n, &off); /* avatar_url */
+    }
+    assert(off == (size_t)n);
+    printf("  walked all %u members, %zd bytes, ended exactly at EOF\n", members, n);
+
     close(udp2);
+
     /* ================================================================ */
     /* IdSetGameInfo must trigger the passphrase gate                     */
     /* (Room carries no LDN crypto passphrase, unlike RyuLdn)            */
@@ -445,6 +483,143 @@ int main(void)
     printf("IdSetGameInfo decoded: '%s' id=%016llx version='%s'\n", g_game_name,
            (unsigned long long)g_game_id, g_game_version);
 
+    }
+
+    /* ================================================================ */
+    /* A FULL room must arrive in ONE datagram - never truncated         */
+    /* ================================================================ */
+    /*
+     * This is the case that used to fail silently. Every member carrying
+     * maximal-length fields is ~377 bytes, and a full room of them needs
+     * ~3.2 KB - well past the 2048-byte buffer the serialiser used to have.
+     * pk_* stopped growing the buffer and set ok=false, so the member list
+     * went out cut off with nothing logged. Rebuild that worst case.
+     */
+    {
+        static const uint16_t BIG_PORT = (uint16_t)(PORT + 2);
+        /* The room identifies a member by its sockaddr, so each member needs
+         * its own socket bound to its own port - one socket would just
+         * re-join the same member over and over. */
+        static const int NMEM = LDN_NODE_MAX - 1;
+        RoomServer *big =
+            room_server_create("127.0.0.1", BIG_PORT, NULL, NULL, "BigRoom", "d", "h",
+                               LDN_NODE_MAX);
+        assert(big != NULL);
+        struct sockaddr_in a;
+        memset(&a, 0, sizeof(a));
+        a.sin_family = AF_INET;
+        a.sin_port = htons(BIG_PORT);
+        inet_pton(AF_INET, "127.0.0.1", &a.sin_addr);
+
+        int socks[LDN_NODE_MAX];
+        for (int i = 0; i < NMEM; i++) {
+            int s = socket(AF_INET, SOCK_DGRAM, 0);
+            assert(s >= 0);
+            struct sockaddr_in self;
+            memset(&self, 0, sizeof(self));
+            self.sin_family = AF_INET;
+            self.sin_addr.s_addr = htonl(INADDR_ANY);
+            self.sin_port = htons((uint16_t)(31000 + i));
+            assert(bind(s, (struct sockaddr *)&self, sizeof(self)) == 0);
+            assert(connect(s, (struct sockaddr *)&a, sizeof(a)) == 0);
+            socks[i] = s;
+        }
+
+        char nick[128];
+        char game[200];
+        memset(nick, 'N', sizeof(nick) - 1);
+        memset(game, 'G', sizeof(game) - 1);
+        nick[sizeof(nick) - 1] = '\0';
+        game[sizeof(game) - 1] = '\0';
+
+        uint8_t pkt[1024];
+        uint8_t r[8];
+        for (int i = 0; i < NMEM; i++) {
+            /* distinct nicknames, otherwise the room is not realistic */
+            snprintf(nick + sizeof(nick) - 5, 5, "%04d", i);
+            size_t l = build_join_request(pkt, nick);
+            assert(send(socks[i], pkt, l, 0) == (ssize_t)l);
+            room_server_poll(big, 0);
+            assert(recv(socks[i], r, sizeof(r), 0) == 5 && r[0] == IdJoinSuccess);
+
+            l = 0;
+            exp_u8(pkt, &l, IdSetGameInfo);
+            exp_str(pkt, &l, game);
+            exp_u32(pkt, &l, 0x0000ABCDu);
+            exp_u32(pkt, &l, 0x0000EF01u);
+            exp_str(pkt, &l, "1.2.3");
+            assert(send(socks[i], pkt, l, 0) == (ssize_t)l);
+            room_server_poll(big, 0);
+            /* every join and game-info triggers a broadcast; drain them */
+            for (int k = 0; k < 16; k++) {
+                if (recv(socks[i], r, sizeof(r), MSG_DONTWAIT) <= 0) {
+                    break;
+                }
+                room_server_poll(big, 0);
+            }
+        }
+
+        /*
+         * A broadcast goes to every member, so the backlog is spread over all
+         * sockets. Drain them all or the next read picks up a stale snapshot
+         * from an earlier stage of the fill.
+         */
+        for (int round = 0; round < 4; round++) {
+            for (int i = 0; i < NMEM; i++) {
+                while (recv(socks[i], r, sizeof(r), MSG_DONTWAIT) > 0) {
+                }
+            }
+            room_server_poll(big, 0);
+        }
+
+        static uint8_t info[16384];
+        room_broadcast_information(big);
+        ssize_t got = -1;
+        for (int attempt = 0; attempt < 100; attempt++) {
+            room_server_poll(big, 0);
+            got = recv(socks[0], info, sizeof(info), MSG_DONTWAIT);
+            if (got > 0 && info[0] == IdRoomInformation) {
+                break;
+            }
+            usleep(3 * 1000);
+        }
+        assert(got > 0);
+        assert(info[0] == IdRoomInformation);
+
+        size_t o = 1;
+        walk_str(info, (size_t)got, &o); /* name */
+        walk_str(info, (size_t)got, &o); /* description */
+        assert(o + 4 + 2 <= (size_t)got);
+        o += 4; /* member_slots */
+        o += 2; /* port */
+        walk_str(info, (size_t)got, &o); /* preferred_game.name */
+        walk_str(info, (size_t)got, &o); /* host_username */
+        assert(o + 4 <= (size_t)got);
+        uint32_t total = rd_be32(info + o);
+        o += 4;
+        assert(total == (uint32_t)NMEM);
+        for (uint32_t i = 0; i < total; i++) {
+            walk_str(info, (size_t)got, &o); /* nickname */
+            assert(o + 4 <= (size_t)got);
+            o += 4; /* fake_ip */
+            walk_str(info, (size_t)got, &o); /* game name */
+            assert(o + 8 <= (size_t)got);
+            o += 8; /* game id */
+            walk_str(info, (size_t)got, &o); /* game version */
+            walk_str(info, (size_t)got, &o); /* username */
+            walk_str(info, (size_t)got, &o); /* display_name */
+            walk_str(info, (size_t)got, &o); /* avatar_url */
+        }
+        assert(o == (size_t)got);
+        assert(got > 2048); /* the old serialiser buffer could not hold this */
+        printf("full-room RoomInformation: %u members in %zd bytes, walk ends at "
+               "EOF\n",
+               total, got);
+
+        for (int i = 0; i < NMEM; i++) {
+            close(socks[i]);
+        }
+        room_server_destroy(big);
     }
 
     /* ---- one poll() must drain more than one queued datagram ---- */
