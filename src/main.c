@@ -1,0 +1,971 @@
+/*
+ * switch_ldn - bridge real Nintendo Switch consoles to the Ryujinx and yuzu
+ * emulator families over the Switch's own local wireless (LDN) protocol.
+ *
+ * Architecture:
+ *
+ *      ┌────────────────────┐  802.11 LDN   ┌──────────────────────────┐
+ *      │  real Switch (D3)  │ ◄──────────►  │  RTL8812AU  +  ldn_bridge│
+ *      └────────────────────┘  (host role)  │  radio.c / host.c        │
+ *                                          └──────────────────────────┘
+ *                                              │ RyuLdn protocol
+ *                                              ▼
+ *                                          ┌──────────────────────────┐
+ *                                          │  Ryubing/Eden guest      │
+ *                                          │  (thinks it joined a LAN)│
+ *                                          └──────────────────────────┘
+ *
+ * The bridge plays the LDN *host* (it is the AP). That role is chosen
+ * deliberately: as host it issues the LDN v3+ authentication challenge and is
+ * therefore free to answer "success" without owning the game, whereas a
+ * station would have to prove independent ownership.
+ *
+ * See DESIGN.md for the full reasoning, the protocol layout and the numbered
+ * open questions.
+ */
+
+#include <arpa/inet.h>
+#include <getopt.h>
+#include <netinet/if_ether.h>
+#include <signal.h>
+#include <unistd.h>
+
+#include "common.h"
+#include "crypto.h"
+#include "host.h"
+#include "ldn.h"
+#include "radio.h"
+#include "room.h"
+#include "ryuldn.h"
+
+
+typedef struct {
+    Radio *radio;
+    Host *host;
+    RyuLdnServer *server;
+    const ProdKeys *prodkeys;
+
+    RoomServer *room_server; /* Eden / yuzu lineage */
+        int room_member;          /* the emulator member id */
+
+    RyuLdnSession *guest; /* the emulator instance (RyuLdn) */
+    uint64_t title_id;
+    uint8_t channel;
+    uint8_t band;
+    uint32_t guest_proxy_ip; /* Ryujinx-format, e.g. 10.114.0.1 */
+    uint8_t guest_mac[6];    /* MAC we assigned the guest at Initialize */
+    /* The LDN crypto passphrase as told to us by the emulator's own
+     * CreateNetwork call. There is no CLI or table fallback by design: both
+     * transports now have a source. */
+    uint8_t learned_passphrase[64];
+    size_t learned_passphrase_len;
+} Bridge;
+
+/* ------------------------------------------------------------------ */
+/* Radio -> RyuLdn (game traffic)                                      */
+/* ------------------------------------------------------------------ */
+
+static bool parse_udp(const uint8_t *eth, size_t len, const uint8_t **udp,
+                      size_t *udp_len, uint16_t *sport, uint16_t *dport,
+                      uint32_t *src_ip, uint32_t *dst_ip)
+{
+    if (rd_be16(eth + 12) != 0x0800) {
+        return false;
+    }
+    const uint8_t *ip = eth + 14;
+    if ((ip[0] >> 4) != 4) {
+        return false;
+    }
+    size_t ihl = (size_t)(ip[0] & 0x0F) * 4;
+    if (len < 14 + ihl + 8) {
+        return false;
+    }
+    if (ip[9] != 17) {
+        return false;
+    }
+    const uint8_t *u = ip + ihl;
+    *src_ip = rd_be32(ip + 12);
+    *dst_ip = rd_be32(ip + 16);
+    *sport = rd_be16(u);
+    *dport = rd_be16(u + 2);
+    *udp_len = rd_be16(u + 4);
+    *udp = u + 8;
+    if (len < 14 + ihl + 8 + *udp_len) {
+        *udp_len = len - 14 - ihl - 8;
+    }
+    return true;
+}
+
+static void deliver_to_guest(Bridge *b, const uint8_t *eth, size_t len)
+{
+    if (!b->guest) {
+        return;
+    }
+
+    const uint8_t *udp;
+    size_t udp_len;
+    uint16_t sport, dport;
+    uint32_t src_ip, dst_ip;
+    if (!parse_udp(eth, len, &udp, &udp_len, &sport, &dport, &src_ip, &dst_ip)) {
+        return;
+    }
+
+    /* Broadcast on the LDN mesh has to fan out to every guest. */
+    bool broadcast = (ntohl(dst_ip) & 0xFF) == 0xFF;
+
+    RyuLdnProxyInfo info;
+    memset(&info, 0, sizeof(info));
+    info.source_ipv4 = src_ip;
+
+    /*
+     * Broadcast must sit in the guest's own subnet. The RyuLdn default
+     * (10.114.0.0/16) makes 0x0A72FFFF look right, but the Room transport's
+     * fake IPs are 192.168.x.y, so a hard-coded value sends the packet to a
+     * subnet nobody is listening on. Derive it from what we handed out.
+     */
+    uint32_t guest_be = b->guest_proxy_ip; /* dotted quad, big-endian in a u32 */
+    uint32_t guest_host = ntohl(guest_be);
+    uint32_t subnet = guest_host & 0xFFFF0000u;
+    info.dest_ipv4 = broadcast ? htonl(subnet | 0x0000FFFFu) : b->guest_proxy_ip;
+    info.source_port = sport;
+    info.dest_port = dport;
+    info.protocol = 17;
+
+    ryuldn_send_proxy_data(b->guest, info, udp, udp_len);
+    LOG_T("radio->guest %u.%u.%u.%u:%u -> %u.%u.%u.%u:%u (%zu bytes)",
+          (ntohl(src_ip) >> 24) & 0xFF, (ntohl(src_ip) >> 16) & 0xFF,
+          (ntohl(src_ip) >> 8) & 0xFF, ntohl(src_ip) & 0xFF, sport,
+          (ntohl(info.dest_ipv4) >> 24) & 0xFF, (ntohl(info.dest_ipv4) >> 16) & 0xFF,
+          (ntohl(info.dest_ipv4) >> 8) & 0xFF, ntohl(info.dest_ipv4) & 0xFF, dport,
+          udp_len);
+}
+
+/* ------------------------------------------------------------------ */
+/* RyuLdn -> radio (game traffic)                                      */
+/* ------------------------------------------------------------------ */
+
+static size_t build_udp_frame(uint8_t *out, size_t out_len, const uint8_t src_mac[6],
+                              const uint8_t dst_mac[6], uint32_t src_ip,
+                              uint32_t dst_ip, uint16_t sport, uint16_t dport,
+                              const uint8_t *payload, size_t payload_len)
+{
+    size_t total = 14 + 20 + 8 + payload_len;
+    if (out_len < total) {
+        return 0;
+    }
+    memset(out, 0, total);
+    memcpy(out, dst_mac, 6);
+    memcpy(out + 6, src_mac, 6);
+    wr_be16(out + 12, 0x0800);
+
+    uint8_t *ip = out + 14;
+    ip[0] = 0x45;
+    wr_be16(ip + 2, (uint16_t)(20 + 8 + payload_len));
+    ip[4] = 0;
+    ip[5] = 0;
+    ip[6] = 0x40;
+    ip[7] = 0;
+    ip[8] = 64;
+    ip[9] = 17;
+    wr_be32(ip + 12, src_ip);
+    wr_be32(ip + 16, dst_ip);
+
+    uint8_t *u = ip + 20;
+    wr_be16(u, sport);
+    wr_be16(u + 2, dport);
+    wr_be16(u + 4, (uint16_t)(8 + payload_len));
+    wr_be16(u + 6, 0); /* checksum: optional in practice */
+
+    memcpy(u + 8, payload, payload_len);
+    return total;
+}
+
+static void deliver_from_guest(Bridge *b, RyuLdnProxyInfo info, const uint8_t *data,
+                               size_t len)
+{
+    if (!b->host) {
+        return;
+    }
+
+    uint32_t dest_host = ntohl(info.dest_ipv4);
+    uint8_t dst_mac[6];
+    bool to_broadcast = (dest_host & 0xFF) == 0xFF;
+
+    if (to_broadcast) {
+        memset(dst_mac, 0xFF, 6);
+    } else {
+        /* find the station that owns this LDN IP */
+        bool found = false;
+        for (int i = 0; i < HOST_MAX_STATIONS; i++) {
+            const HostStation *st = host_station(b->host, i);
+            if (st && st->in_use && st->ipv4 == info.dest_ipv4) {
+                memcpy(dst_mac, st->mac, 6);
+                found = true;
+                break;
+            }
+        }
+        if (!found) {
+            LOG_T("guest sent to unknown LDN IP %u.%u.%u.%u", (dest_host >> 24) & 0xFF,
+                  (dest_host >> 16) & 0xFF, (dest_host >> 8) & 0xFF, dest_host & 0xFF);
+            return;
+        }
+    }
+
+    uint8_t frame[2304];
+    size_t n = build_udp_frame(
+        frame, sizeof(frame), radio_config(b->radio)->mac, dst_mac,
+        b->guest_proxy_ip, info.dest_ipv4, info.source_port, info.dest_port, data, len);
+    if (!n) {
+        return;
+    }
+    radio_send(b->radio, frame, n);
+    LOG_T("guest->radio %zu bytes to %02x:%02x:%02x:%02x:%02x:%02x", len, dst_mac[0],
+          dst_mac[1], dst_mac[2], dst_mac[3], dst_mac[4], dst_mac[5]);
+}
+
+/* ------------------------------------------------------------------ */
+/* RyuLdn handlers                                                    */
+/* ------------------------------------------------------------------ */
+
+static void build_network_info(Bridge *b, RyuLdnNetworkInfo *info)
+{
+    ryuldn_network_info_init(info);
+
+    /* network_id = intent id (title id in the first 8 bytes) */
+    wr_le64(info->network_id, b->title_id);
+
+    /* CommonNetworkInfo: mac, ssid, channel, link level, network type */
+    memcpy(info->common, radio_config(b->radio)->mac, 6);
+    memset(info->common + 6, 0, 34);
+    wr_le16(info->common + 40, b->channel);
+    wr_le16(info->common + 42, 3); /* link level: "good" */
+    info->common[44] = 2;          /* NetworkType.Ldn */
+
+    /* LdnNetworkInfo */
+    if (b->host) {
+        memcpy(info->security_parameter, host_advertise(b->host)->server_random, 16);
+    }
+
+    HostStation *self = (HostStation *)host_station(b->host, 0);
+    int count = 0;
+
+    /*
+     * Node layout. The guest identifies its own node by matching its
+     * assigned IP, so we place the guest's station at index 0 and each real
+     * console after it.
+     */
+    for (int i = 0; i < HOST_MAX_STATIONS; i++) {
+        const HostStation *st = i == 0 ? self : host_station(b->host, i);
+        if (!st || !st->in_use) {
+            continue;
+        }
+
+        RyuLdnNodeInfo *node = &info->nodes[count];
+        node->ipv4_address = (i == 0) ? b->guest_proxy_ip : st->ipv4;
+        memcpy(node->mac, i == 0 ? radio_config(b->radio)->mac : st->mac, 6);
+        node->node_id = (uint8_t)count;
+        node->is_connected = 1;
+        strncpy(node->user_name, st->username, sizeof(node->user_name) - 1);
+        node->local_communication_version = st->app_communication_version;
+        count++;
+    }
+
+    info->node_count = (uint8_t)count;
+    info->node_count_max = HOST_MAX_STATIONS;
+    info->advertise_data_size = host_advertise(b->host)->app_data_size;
+    memcpy(info->advertise_data, host_advertise(b->host)->app_data,
+           info->advertise_data_size);
+}
+
+/*
+ * Step 3 of the handshake. There is no network yet - ProxyConfig and Connected
+ * are sent later, when the guest's game creates its LDN network (see
+ * on_access_point). Sending them here would reference a null host.
+ */
+static void on_initialized(RyuLdnSession *session, const uint8_t session_id[16],
+                           const uint8_t mac[6], void *user)
+{
+    Bridge *b = user;
+    (void)session_id;
+
+    /*
+     * The guest's MAC is assigned by us, and the emulator will present it on
+     * the mesh. Keep it in sync with what the real consoles will see so the
+     * advertisement and the RyuLdn view agree.
+     */
+    if (radio_config(b->radio)) {
+        /* RadioConfig.mac is ours, not the guest's; nothing to copy. */
+    }
+    memcpy(b->guest_mac, mac, 6);
+    LOG_D("guest initialized with MAC %02x:%02x:%02x:%02x:%02x:%02x", mac[0], mac[1],
+          mac[2], mac[3], mac[4], mac[5]);
+}
+
+static void on_access_point(RyuLdnSession *session, const uint8_t *payload, size_t len,
+                            bool is_private, void *user)
+{
+    Bridge *b = user;
+    (void)payload;
+    (void)len;
+    b->guest = session;
+
+    /*
+     * The emulator's game has just created its LDN network. Its
+     * nn::ldn::CreateNetwork call carried the crypto passphrase, the title id,
+     * the channel, the player limit and the local communication version, and
+     * RyuLdn forwarded all of it to us. So this is where the real 802.11
+     * network is configured - and why no per-game lookup table is needed.
+     */
+    const RyuLdnGuestGameSettings *guest = ryuldn_session_guest_settings(session);
+    if (!guest) {
+        LOG_E("guest created a network but sent no settings");
+        ryuldn_send_network_error(session, 0);
+        return;
+    }
+
+    uint8_t passphrase[64];
+    size_t passphrase_len = 0;
+    if (guest->security.passphrase_size &&
+        guest->security.passphrase_size <= sizeof(passphrase)) {
+        memcpy(passphrase, guest->security.passphrase, guest->security.passphrase_size);
+        passphrase_len = guest->security.passphrase_size;
+    }
+
+    uint64_t title_id = guest->network.intent_id.local_communication_id;
+    uint16_t channel = guest->network.channel ? guest->network.channel : b->channel;
+    const char *username =
+        guest->user.user_name[0] ? guest->user.user_name : "Player";
+    uint16_t comm_version = guest->network.local_communication_version;
+
+    if (b->guest_proxy_ip == 0) {
+        b->guest_proxy_ip = htonl(0x0A720001);
+    }
+
+    if (!b->host) {
+        b->host = host_create(b->prodkeys, title_id, channel, b->band,
+                              guest->network.node_count_max, passphrase,
+                              passphrase_len, username, comm_version);
+    } else {
+        if (host_adopt_guest_settings(b->host, title_id, channel,
+                                     guest->network.node_count_max, passphrase,
+                                     passphrase_len, username,
+                                     comm_version) != 0) {
+            LOG_E("could not configure the LDN network from the guest's settings; "
+                  "a console trying to scan will not find it");
+            return;
+        }
+    }
+    if (!b->host) {
+        return;
+    }
+
+    b->title_id = title_id;
+    b->channel = channel;
+
+    if (radio_config(b->radio) && radio_config(b->radio)->channel != channel) {
+        LOG_W("guest asked for channel %u but the radio is on %u; run "
+              "setup-ap.sh with CHANNEL=%u to match",
+              channel, radio_config(b->radio)->channel, channel);
+    }
+
+    /* Mirror the guest's advertise data so both sides of the mesh agree. */
+    host_set_app_data(b->host, guest->advertise_data, guest->advertise_data_size);
+    host_sync_station_list(b->host);
+
+    /*
+     * Step 5: the guest is now in a network. ProxyConfig tells it the LDN
+     * subnet, then Connected hands over the NetworkInfo it must publish.
+     */
+    RyuLdnProxyConfig cfg;
+    cfg.proxy_ip = b->guest_proxy_ip;
+    cfg.proxy_subnet_mask = htonl(0xFFFF0000);
+    ryuldn_send_proxy_config(session, cfg);
+
+    RyuLdnNetworkInfo info;
+    build_network_info(b, &info);
+    ryuldn_send_connected(session, &info);
+
+    LOG_I("%s network live for real consoles: title=%016llx channel=%u "
+          "(guest proxy IP %u.%u.%u.%u)",
+          is_private ? "private" : "public", (unsigned long long)title_id, channel,
+          (ntohl(b->guest_proxy_ip) >> 24) & 0xFF, (ntohl(b->guest_proxy_ip) >> 16) & 0xFF,
+          (ntohl(b->guest_proxy_ip) >> 8) & 0xFF, ntohl(b->guest_proxy_ip) & 0xFF);
+}
+
+/*
+ * Step 5: the guest's game created the network, so this guest is the LDN host.
+ * ProxyConfig tells it which subnet the mesh uses, and Connected hands over the
+ * NetworkInfo it has to publish to its own players.
+ *
+ * Called from on_access_point once b->host is configured.
+ */
+static void on_connected(RyuLdnSession *session, void *user)
+{
+    Bridge *b = user;
+
+    RyuLdnProxyConfig cfg;
+    cfg.proxy_ip = b->guest_proxy_ip;
+    cfg.proxy_subnet_mask = htonl(0xFFFF0000);
+    ryuldn_send_proxy_config(session, cfg);
+
+    RyuLdnNetworkInfo info;
+    build_network_info(b, &info);
+    ryuldn_send_connected(session, &info);
+
+    LOG_I("guest connected as node 0 (proxy IP %u.%u.%u.%u)",
+          (ntohl(b->guest_proxy_ip) >> 24) & 0xFF, (ntohl(b->guest_proxy_ip) >> 16) & 0xFF,
+          (ntohl(b->guest_proxy_ip) >> 8) & 0xFF, ntohl(b->guest_proxy_ip) & 0xFF);
+}
+
+/*
+ * Scanning is a *station* activity. In p0 the guest is the host and real
+ * consoles join it, so there is never anything for the guest to discover.
+ * Reply with an empty list so the game's UI does not hang.
+ */
+static void on_scan(RyuLdnSession *session, const uint8_t *payload, size_t len,
+                    void *user)
+{
+    (void)payload;
+    (void)len;
+    (void)user;
+    LOG_D("scan: p0 has no networks to report (the guest hosts)");
+    ryuldn_send_scan_reply_end(session);
+}
+
+static void on_proxy_data(RyuLdnSession *session, RyuLdnProxyInfo info,
+                         const uint8_t *data, size_t len, void *user)
+{
+    (void)session;
+    deliver_from_guest(user, info, data, len);
+}
+
+static void on_proxy_connect(RyuLdnSession *session, RyuLdnProxyInfo info, void *user)
+{
+    Bridge *b = user;
+    (void)b;
+    ryuldn_send_proxy_connect_reply(session, info);
+}
+
+static void on_proxy_disconnect(RyuLdnSession *session, RyuLdnProxyInfo info, void *user)
+{
+    (void)session;
+    (void)info;
+    (void)user;
+}
+
+static const RyuLdnHandlers k_handlers = {
+    .on_initialized = on_initialized,
+    .on_connected = on_connected,
+    .on_access_point = on_access_point,
+    .on_scan = on_scan,
+    .on_proxy_data = on_proxy_data,
+    .on_proxy_connect = on_proxy_connect,
+    .on_proxy_disconnect = on_proxy_disconnect,
+};
+
+/* ------------------------------------------------------------------ */
+/* Notifying the emulator that a real console joined or left          */
+/* ------------------------------------------------------------------ */
+
+/*
+ * A real console associating to our AP is invisible to the emulator until we
+ * say so: RyuLdn guests expect a SyncNetwork, Room members expect an
+ * IdLdnPacket{Connect}/IdLdnPacket{Disconnect} carrying a Ryujinx-format
+ * NodeInfo. Both carry the very same struct, which is why the LDN core can be
+ * shared.
+ */
+static void fill_node_info(RyuLdnNodeInfo *node, const HostStation *st,
+                           const uint8_t mac[6], const char *username)
+{
+    memset(node, 0, sizeof(*node));
+    node->ipv4_address = st->ipv4;
+    memcpy(node->mac, mac, 6);
+    node->node_id = 0; /* filled in by the peer from its own table */
+    node->is_connected = 1;
+    snprintf(node->user_name, sizeof(node->user_name), "%s",
+             username && *username ? username : "Switch");
+    node->local_communication_version = st->app_communication_version;
+}
+
+static void notify_station_changed(Bridge *b, const HostEvent *ev)
+{
+    if (!b->host) {
+        return;
+    }
+    const HostStation *st = host_station(b->host, ev->index);
+    if (!st || !st->in_use) {
+        return;
+    }
+
+    RyuLdnNodeInfo node;
+    fill_node_info(&node, st, st->mac, st->username);
+
+    bool joined = ev->kind == HOST_EVENT_STATION_JOINED;
+
+    /* --- RyuLdn guest: push the whole NetworkInfo --- */
+    if (b->guest) {
+        RyuLdnNetworkInfo info;
+        build_network_info(b, &info);
+        ryuldn_send_sync_network(b->guest, &info);
+        LOG_D("SyncNetwork -> RyuLdn guest (%d stations)", info.node_count);
+    }
+
+    /* --- Room member: Connect/Disconnect carrying a NodeInfo --- */
+    if (b->room_member) {
+        LDNPacketType type = joined ? LDNPacketTypeConnect : LDNPacketTypeDisconnect;
+
+        /*
+         * local_ip is the joining node's own address from the room member's
+         * point of view; yuzu pushes it straight onto connected_clients.
+         */
+        uint32_t st_host = ntohl(st->ipv4);
+        uint8_t st_ip[4] = {(uint8_t)(st_host >> 24), (uint8_t)(st_host >> 16),
+                            (uint8_t)(st_host >> 8), (uint8_t)st_host};
+        room_send_ldn_packet(b->room_server, b->room_member, type, st_ip, st_ip, false,
+                             &node, (uint32_t)sizeof(node));
+        LOG_D("IdLdnPacket{%s} -> room member (slot %d)",
+              joined ? "Connect" : "Disconnect", ev->index);
+    }
+}
+
+/* ------------------------------------------------------------------ */
+/* Room transport (Eden / yuzu lineage)                               */
+/* ------------------------------------------------------------------ */
+
+/*
+ * yuzu's LANDiscovery maps its LDN state machine onto six LDNPacketType
+ * values. The bridge is the LDN host, so:
+ *
+ *   Scan        -> answer with a ScanResp carrying our NetworkInfo
+ *   ScanResp    -> nothing to do (we are the host, not a scanner)
+ *   Connect     -> the emulator wants in; it is already the host, so ack
+ *   SyncNetwork -> the emulator re-published its view; ignore (ours wins)
+ *   Disconnect   -> the emulator left
+ *   DestroyNetwork -> the emulator tore the room down
+ */
+
+static void room_on_join(RoomServer *server, const RoomMemberInfo *member, void *user)
+{
+    Bridge *b = user;
+    b->room_member = member->id;
+
+    LOG_I("room member #%d '%s' joined as %u.%u.%u.%u", member->id, member->nickname,
+          member->fake_ip[0], member->fake_ip[1], member->fake_ip[2],
+          member->fake_ip[3]);
+
+    /*
+     * The room's fake IP replaces RyuLdn's assigned IP as the guest's address
+     * on the mesh. Both are "the emulator's own address".
+     */
+    uint32_t ip = ((uint32_t)member->fake_ip[0] << 24) |
+                 ((uint32_t)member->fake_ip[1] << 16) |
+                 ((uint32_t)member->fake_ip[2] << 8) | (uint32_t)member->fake_ip[3];
+    b->guest_proxy_ip = htonl(ip);
+
+    /* The room list is what the game's UI reads. */
+    room_broadcast_information(server);
+}
+
+static void room_on_leave(RoomServer *server, int member_id, void *user)
+{
+    Bridge *b = user;
+    if (b->room_member == member_id) {
+        b->room_member = 0;
+        LOG_I("room member #%d left", member_id);
+    }
+}
+
+/*
+ * The Room protocol has no CreateAccessPoint equivalent: IdSetGameInfo carries
+ * contains only {name, id, version}, and JoinRequest's "password" is the ROOM password,
+ * not the LDN crypto passphrase. So unlike RyuLdn - where the guest's own
+ * CreateNetwork supplies everything - the bridge has to learn the passphrase
+ * from the patched Eden, which appends it to every IdLdnPacket.
+ *
+ * Without a passphrase the LDN network cannot be built at all, because retail
+ * firmware only accepts security level 1 (AES-CTR), whose key is derived from
+ * it. Better to fail loudly than to advertise a network that no console will
+ * ever be able to join.
+ */
+static int room_configure_host(Bridge *b, const RoomPacketIn *pkt,
+                               const char *nickname)
+{
+    if (!pkt->game_id) {
+        return 0; /* not a game report; nothing to do */
+    }
+
+    if (b->host) {
+        /* Already configured. Re-read the title id in case the member
+         * switched games without leaving the room. */
+        if (b->title_id != pkt->game_id) {
+            LOG_I("room member switched to title %016llx",
+                  (unsigned long long)pkt->game_id);
+            b->title_id = pkt->game_id;
+        }
+        return 0;
+    }
+
+    uint8_t passphrase[64];
+    size_t passphrase_len = 0;
+
+    if (b->learned_passphrase_len) {
+        /* The patched Eden forward it inside its own IdLdnPacket. */
+        memcpy(passphrase, b->learned_passphrase, b->learned_passphrase_len);
+        passphrase_len = b->learned_passphrase_len;
+    }
+
+    if (!passphrase_len) {
+        LOG_E("Room transport: cannot build the LDN network for title %016llx, "
+              "because the LDN crypto passphrase never arrived. Stock Eden "
+              "drops it in LANDiscovery::CreateNetwork(); apply "
+              "patches/eden-room-passphrase.patch to forward it.",
+              (unsigned long long)pkt->game_id);
+        room_send_reject(b->room_server, b->room_member, RoomRejectCloseRoom);
+        return -1;
+    }
+
+    LOG_I("using the %zu-byte passphrase supplied by the room member", passphrase_len);
+
+    b->host = host_create(b->prodkeys, pkt->game_id, b->channel, b->band, 8, passphrase,
+                          passphrase_len, nickname, pkt->game_version[0] ? 1 : 0);
+    if (!b->host) {
+        return -1;
+    }
+    b->title_id = pkt->game_id;
+
+    LOG_I("LDN host created from the room member's game report (title=%016llx, "
+          "channel=%u)", (unsigned long long)b->title_id, b->channel);
+    return 0;
+}
+
+static void room_on_packet(RoomServer *server, int member_id, const RoomPacketIn *pkt,
+                           void *user)
+{
+    Bridge *b = user;
+    if (!b->room_member || member_id != b->room_member) {
+        return;
+    }
+
+    if (pkt->type == IdSetGameInfo) {
+        if (room_configure_host(b, pkt, pkt->game_name) == 0 && b->host) {
+            /* The guest will start scanning; answer with our own view. */
+            host_sync_station_list(b->host);
+        }
+        return;
+    }
+
+    if (pkt->type == IdLdnPacket) {
+        /* A patched Eden repeats the passphrase on every packet; remember the
+         * first one so the host can be built as soon as we know the title. */
+        if (pkt->passphrase_len && !b->learned_passphrase_len) {
+            memcpy(b->learned_passphrase, pkt->passphrase, pkt->passphrase_len);
+            b->learned_passphrase_len = pkt->passphrase_len;
+            LOG_D("learned a %u-byte LDN passphrase from the room member",
+                  pkt->passphrase_len);
+        }
+
+        switch ((LDNPacketType)pkt->ldn_packet_type) {
+        case LDNPacketTypeScan: {
+            if (!b->host) {
+                /*
+                 * The room member is in this room but the emulator's game has
+                 * not called CreateNetwork yet, so there is no LDN network to
+                 * advertise. Replying with an empty ScanResp would make yuzu
+                 * insert an all-zero NetworkInfo into scan_results, so it is
+                 * better to say nothing and let it scan again.
+                 */
+                LOG_D("room: Scan before the guest created a network; ignoring");
+                return;
+            }
+
+            LOG_D("room: LDN Scan -> replying with our NetworkInfo");
+            RyuLdnNetworkInfo info;
+            build_network_info(b, &info);
+            room_send_ldn_packet(server, member_id, LDNPacketTypeScanResp,
+                                 pkt->ldn_remote_ip, pkt->ldn_local_ip, false, &info,
+                                 (uint32_t)sizeof(info));
+            return;
+        }
+
+        case LDNPacketTypeScanResp:
+            /* we are the host; other scanners reply, not us */
+            return;
+
+        case LDNPacketTypeConnect:
+            LOG_D("room: LDN Connect from guest (it is the host, nothing to do)");
+            return;
+
+        case LDNPacketTypeSyncNetwork:
+            return;
+
+        case LDNPacketTypeDisconnect:
+            LOG_I("room: guest disconnected");
+            return;
+
+        case LDNPacketTypeDestroyNetwork:
+            LOG_I("room: guest destroyed the network");
+            return;
+        }
+        return;
+    }
+
+    if (pkt->type == IdProxyPacket) {
+        /* yuzu's game traffic: same shape as RyuLdn ProxyData. */
+        RyuLdnProxyInfo info;
+        memset(&info, 0, sizeof(info));
+        info.source_ipv4 = rd_be32(pkt->local_ip);
+        info.source_port = pkt->local_port;
+        info.dest_ipv4 = pkt->remote_ip[0] == 0xFF && pkt->remote_ip[3] == 0xFF
+                             ? htonl(0xFFFFFFFFu)
+                             : rd_be32(pkt->remote_ip);
+        info.dest_port = pkt->remote_port;
+        info.protocol = pkt->protocol;
+        deliver_from_guest(b, info, pkt->data, pkt->data_len);
+        return;
+    }
+
+}
+
+/* ------------------------------------------------------------------ */
+/* Radio RX                                                           */
+/* ------------------------------------------------------------------ */
+
+static void radio_rx(const RadioFrame *frame, void *user)
+{
+    Bridge *b = user;
+
+    if (frame->frame_len < sizeof(struct ethhdr)) {
+        return;
+    }
+
+    uint16_t ethertype = rd_be16(frame->frame + 12);
+
+    if (ethertype == ETH_P_LDN) {
+        /* LDN control frames (auth/disconnect) - the host FSM owns those. */
+        if (b->host) {
+            host_handle_frame(b->host, b->radio, frame);
+        }
+        return;
+    }
+
+    if (ethertype == 0x0800) {
+        /* IPv4 = Pia mesh traffic; relay it to the emulator guest. */
+        deliver_to_guest(b, frame->frame, frame->frame_len);
+        return;
+    }
+}
+
+/* ------------------------------------------------------------------ */
+/* CLI                                                                */
+/* ------------------------------------------------------------------ */
+
+static const char *k_usage =
+    "switch_ldn - bridge real Nintendo Switch consoles to the Ryujinx and yuzu\n"
+    "emulator families over the Switch's own local wireless (LDN) protocol.\n"
+    "\n"
+    "  switch_ldn --selfcheck <iface>\n"
+    "\n"
+    "  # Both transports listen at once. The emulator's own CreateNetwork call\n"
+    "  # supplies the passphrase, the title id and the local communication\n"
+    "  # version, so prod.keys is the only thing the bridge needs from you.\n"
+    "  switch_ldn --ap-iface wlan0 --mon-iface wlan0 --channel 1 --prodkeys prod.keys\n"
+    "\n"
+    "Options:\n"
+    "  --selfcheck <if>       probe the NIC (mode, freq, VIF support) and exit\n"
+    "  --ap-iface <if>        interface managed by hostapd (required)\n"
+    "  --mon-iface <if>       interface in monitor mode for action frames\n"
+    "  --channel <n>          LDN channel: 1/6/11 (2.4G) or 36-48 (5G).\n"
+    "                         Used as the default until the game picks one.\n"
+    "  --band <2|5>           band, default 2\n"
+    "  --prodkeys <file>      prod.keys from your console (required)\n"
+    "  --bind <addr>          bind address for both protocols (default 127.0.0.1)\n"
+    "  --port <n>             RyuLdn port (default 30456) - Ryubing/Ryujinx\n"
+    "  --room-port <n>        Room port (default 24872) - Eden/yuzu\n"
+    "  --room-name <s>        name shown in the room list\n"
+    "  -v, --verbose          raise log verbosity\n"
+    "\n";
+
+static volatile sig_atomic_t g_stop;
+
+static void on_signal(int sig)
+{
+    (void)sig;
+    g_stop = 1;
+}
+
+int main(int argc, char **argv)
+{
+    static struct option opts[] = {
+        {"selfcheck", required_argument, 0, 'S'},
+        {"ap-iface", required_argument, 0, 'a'},
+        {"mon-iface", required_argument, 0, 'm'},
+        {"channel", required_argument, 0, 'c'},
+        {"band", required_argument, 0, 'b'},
+        {"prodkeys", required_argument, 0, 'k'},
+        {"host-name", required_argument, 0, 'n'},
+        {"bind", required_argument, 0, 'B'},
+        {"room-port", required_argument, 0, 'R'},
+        {"room-name", required_argument, 0, 'N'},
+        {"port", required_argument, 0, 'P'},
+        {"verbose", no_argument, 0, 'v'},
+        {"help", no_argument, 0, 'h'},
+        {0, 0, 0, 0},
+    };
+
+    const char *ap_iface = NULL;
+    const char *mon_iface = NULL;
+    const char *prodkeys_path = NULL;
+    const char *host_name = "Player";
+    const char *bind_addr = "127.0.0.1";
+    uint16_t room_port = ROOM_DEFAULT_PORT;
+    const char *room_name = "switch_ldn";
+    const char *selfcheck_iface = NULL;
+    uint16_t port = 30456;
+    uint8_t channel = 1;
+    uint8_t band = 2;
+
+    int c;
+    int idx = 0;
+    while ((c = getopt_long(argc, argv, "v", opts, &idx)) != -1) {
+        switch (c) {
+        case 'S': selfcheck_iface = optarg; break;
+        case 'a': ap_iface = optarg; break;
+        case 'm': mon_iface = optarg; break;
+        case 'c': channel = (uint8_t)atoi(optarg); break;
+        case 'b': band = (uint8_t)atoi(optarg); break;
+        case 'k': prodkeys_path = optarg; break;
+        case 'n': host_name = optarg; break;
+        case 'B': bind_addr = optarg; break;
+        case 'R': room_port = (uint16_t)atoi(optarg); break;
+        case 'N': room_name = optarg; break;
+        case 'P': port = (uint16_t)atoi(optarg); break;
+        case 'v': log_set_level(LOG_DEBUG); break;
+        case 'h': fputs(k_usage, stdout); return 0;
+        default: fputs(k_usage, stderr); return 1;
+        }
+    }
+
+    /* ---------------- selfcheck mode ---------------- */
+    if (selfcheck_iface) {
+        radio_selfcheck(selfcheck_iface);
+        return 0;
+    }
+
+    /* ---------------- prod.keys ---------------- */
+    ProdKeys prodkeys;
+    memset(&prodkeys, 0, sizeof(prodkeys));
+
+    if (prodkeys_path) {
+        if (prodkeys_load(&prodkeys, prodkeys_path) != 0) {
+            return 1;
+        }
+    }
+
+    /* ---------------- live mode ---------------- */
+    if (!ap_iface) {
+        LOG_E("--ap-iface is required in live mode");
+        fputs(k_usage, stderr);
+        return 1;
+    }
+    if (band == 5 && (channel < 36 || channel > 48)) {
+        LOG_W("5 GHz band needs channel 36-48");
+    }
+    if (band == 2 && channel != 1 && channel != 6 && channel != 11) {
+        LOG_W("2.4 GHz band should use channel 1, 6 or 11 (got %u)", channel);
+    }
+
+    signal(SIGINT, on_signal);
+    signal(SIGTERM, on_signal);
+
+    Bridge bridge;
+    memset(&bridge, 0, sizeof(bridge));
+    bridge.prodkeys = prodkeys_path ? &prodkeys : NULL;
+    bridge.channel = channel;
+    bridge.band = band;
+    bridge.guest_proxy_ip = htonl(0x0A720001); /* 10.114.0.1 */
+
+    Bridge *b = &bridge;
+
+    b->server = ryuldn_server_create(bind_addr, port, &k_handlers, b);
+    if (!b->server) {
+        return 1;
+    }
+
+    /*
+     * Same bridge, second transport. Ryubing points at --port, Eden points at
+     * --room-port; both drive the identical LDN core underneath, so a user can
+     * switch between them without noticing anything.
+     */
+    RoomHandlers room_handlers = {
+        .on_join = room_on_join,
+        .on_leave = room_on_leave,
+        .on_packet = room_on_packet,
+    };
+    b->room_server = room_server_create(bind_addr, room_port, &room_handlers, b,
+                                       room_name, "switch_ldn bridge", host_name,
+                                       LDN_NODE_MAX);
+    if (!b->room_server) {
+        LOG_E("could not start the Room transport (port %u in use?)", room_port);
+        return 1;
+    }
+
+    RadioConfig rcfg;
+    memset(&rcfg, 0, sizeof(rcfg));
+    strncpy(rcfg.ap_iface, ap_iface, sizeof(rcfg.ap_iface) - 1);
+    strncpy(rcfg.mon_iface, mon_iface ? mon_iface : ap_iface,
+            sizeof(rcfg.mon_iface) - 1);
+    rcfg.channel = channel;
+    rcfg.band = band;
+    if (radio_get_hwaddr(ap_iface, rcfg.mac) != 0) {
+        LOG_E("cannot read MAC of %s", ap_iface);
+        return 1;
+    }
+    LOG_I("AP MAC %02x:%02x:%02x:%02x:%02x:%02x", rcfg.mac[0], rcfg.mac[1], rcfg.mac[2],
+          rcfg.mac[3], rcfg.mac[4], rcfg.mac[5]);
+
+    b->radio = radio_open(&rcfg, radio_rx, b);
+    if (!b->radio) {
+        return 1;
+    }
+
+    /*
+     * The LDN host is created lazily, when the emulator's game calls
+     * CreateNetwork: that call carries the passphrase, the title id and the
+     * local communication version. All we need up front is prod.keys.
+     */
+    if (!prodkeys_path) {
+        LOG_E("live mode needs --prodkeys (see --help)");
+        return 1;
+    }
+
+    LOG_I("bridge running: RyuLdn on %s:%u, Room on %s:%u, hostapd on '%s'",
+          bind_addr, port, bind_addr, room_port, ap_iface);
+    LOG_I("  Ryubing/Ryujinx -> Multiplayer > LDN > Mode: RyuLDN, server %s:%u",
+          bind_addr, port);
+    LOG_I("  Eden/Citron     -> Multiplayer > Direct Connect > %s:%u", bind_addr,
+          room_port);
+
+    while (!g_stop) {
+        ryuldn_server_poll(b->server, 0);
+        room_server_poll(b->room_server, 0);
+
+        if (radio_config(b->radio)->mon_iface[0]) {
+            radio_poll(b->radio, 50);
+        }
+        if (b->host) {
+            host_tick(b->host, b->radio);
+
+            HostEvent ev;
+            while (host_poll_event(b->host, &ev)) {
+                notify_station_changed(b, &ev);
+            }
+        }
+    }
+
+    LOG_I("shutting down");
+    host_destroy(b->host);
+    radio_close(b->radio);
+    room_server_destroy(b->room_server);
+    ryuldn_server_destroy(b->server);
+    return 0;
+}

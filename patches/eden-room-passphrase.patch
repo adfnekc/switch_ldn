@@ -1,0 +1,72 @@
+diff --git a/src/core/hle/service/ldn/lan_discovery.cpp b/src/core/hle/service/ldn/lan_discovery.cpp
+index f37dbe4..bcae47c 100644
+--- a/src/core/hle/service/ldn/lan_discovery.cpp
++++ b/src/core/hle/service/ldn/lan_discovery.cpp
+@@ -240,6 +240,11 @@ Result LANDiscovery::CreateNetwork(const SecurityConfig& security_config,
+         return ResultBadState;
+     }
+ 
++    // Keep the game's LDN crypto passphrase so it can be forwarded to the room.
++    current_passphrase.assign(security_config.passphrase.begin(),
++                              security_config.passphrase.begin() +
++                                  security_config.passphrase_size);
++
+     InitNetworkInfo();
+     network_info.ldn.node_count_max = network_config.node_count_max;
+     network_info.ldn.security_mode = security_config.security_mode;
+@@ -471,7 +476,11 @@ void LANDiscovery::SendBroadcast(Network::LDNPacketType type) {
+ void LANDiscovery::SendPacket(const Network::LDNPacket& packet) {
+     if (auto room_member = Network::GetRoomMember().lock()) {
+         if (room_member->IsConnected()) {
+-            room_member->SendLdnPacket(packet);
++            // Attach the passphrase. It is appended after `data`, which stock
++            // parsers read past, so this stays wire-compatible.
++            Network::LDNPacket with_passphrase = packet;
++            with_passphrase.passphrase = current_passphrase;
++            room_member->SendLdnPacket(std::move(with_passphrase));
+         }
+     }
+ }
+diff --git a/src/core/hle/service/ldn/lan_discovery.h b/src/core/hle/service/ldn/lan_discovery.h
+index 5d0642b..761a42a 100644
+--- a/src/core/hle/service/ldn/lan_discovery.h
++++ b/src/core/hle/service/ldn/lan_discovery.h
+@@ -116,6 +116,10 @@ protected:
+ 
+     bool inited{};
+     std::mutex packet_mutex;
++    /// LDN crypto passphrase of the network we are hosting, if any.
++    /// Stock Eden discards it in CreateNetwork(), which stops a bridge from
++    /// deriving the AES key for the network.
++    std::vector<u8> current_passphrase;
+     std::array<LanStation, StationCountMax> stations;
+     std::array<NodeLatestUpdate, NodeCountMax> node_changes{};
+     std::array<u8, NodeCountMax> node_last_states{};
+diff --git a/src/network/room_member.cpp b/src/network/room_member.cpp
+index 029e103..47578e2 100644
+--- a/src/network/room_member.cpp
++++ b/src/network/room_member.cpp
+@@ -651,6 +651,9 @@ void RoomMember::SendLdnPacket(const LDNPacket& ldn_packet) {
+ 
+     packet.Write(ldn_packet.data);
+ 
++    // Optional trailing field; stock readers stop at `data` and ignore this.
++    packet.Write(ldn_packet.passphrase);
++
+     room_member_impl->Send(std::move(packet));
+ }
+ 
+diff --git a/src/network/room_member.h b/src/network/room_member.h
+index 8cc59ad..4aca55d 100644
+--- a/src/network/room_member.h
++++ b/src/network/room_member.h
+@@ -35,6 +35,9 @@ struct LDNPacket {
+     IPv4Address remote_ip;
+     bool broadcast;
+     std::vector<u8> data;
++    /// Optional LDN crypto passphrase, appended after `data` on the wire.
++    /// Empty on stock builds, which parse only up to `data`.
++    std::vector<u8> passphrase;
+ };
+ 
+ /// Information about the received proxy packets.
