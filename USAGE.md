@@ -186,6 +186,12 @@ mt7921au 这类内核原生支持好的芯片会省事很多。
   because the LDN crypto passphrase never arrived.`
 - 认证请求的 session_info（title id + scene id）与桥不一致：按 malformed（status 2）拒掉
 - p1（模拟器加入真机房间）：返回 `NetworkError(ConnectionRejected)`，不挂起
+- Room 里房间已满 / 协议版本不匹配：直接回 `IdRoomIsFull` / `IdVersionMismatch`，
+  不再把拒绝报文丢掉让模拟器一直转圈
+
+Room 的成员表有一条 60 秒静默回收（`room_server_set_idle_timeout_ms` 可调，设 0 关闭）:
+Room 协议本身没有断连也没有心跳，一个关掉的成员会一直占着位置，所以桥会在房间需要
+空位时回收静默超限的成员，否则房间会被永久占满、之后谁都进不来。活跃成员不受影响。
 
 AES-CTR counter block 布局已经用 kinnay/LDN 的参考向量钉死了（`tests/test_ctr_vectors.c`），
 不再是未知项；`ChallengeResponse` 也不需要——真机根本不解析房主回的 challenge

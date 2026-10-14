@@ -12,6 +12,8 @@ BIN    := switch_ldn
 SRCS := $(wildcard $(SRCDIR)/*.c)
 OBJS := $(patsubst $(SRCDIR)/%.c,$(OBJDIR)/%.o,$(SRCS))
 TEST_OBJS := build/crypto.o build/ldn.o build/ryuldn.o build/room.o build/radio.o build/util.o
+# host.o lives outside TEST_OBJS because only the host-side tests need it, but
+# `make test` must still build it or those links fail from a clean tree.
 BRIDGE_OBJS := build/crypto.o build/ldn.o build/ryuldn.o build/room.o build/radio.o build/util.o build/host.o
 
 .PHONY: all clean check test interop
@@ -33,7 +35,7 @@ clean:
 # ---------------------------------------------------------------------------
 # Tests. All of them are socket-level and need no radio hardware.
 # ---------------------------------------------------------------------------
-test: $(TEST_OBJS)
+test: $(TEST_OBJS) build/host.o
 	$(CC) $(CFLAGS) $(CPPFLAGS) -Isrc -o build/test_wire tests/test_wire.c \
 	    $(TEST_OBJS) $(LDLIBS)
 	./build/test_wire

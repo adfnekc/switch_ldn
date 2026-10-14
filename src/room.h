@@ -160,6 +160,8 @@ RoomServer *room_server_create(const char *bind_addr, uint16_t port,
                                const RoomHandlers *handlers, void *user,
                                const char *room_name, const char *room_description,
                                const char *host_username, uint32_t member_slots);
+void room_server_set_idle_timeout_ms(RoomServer *server, uint64_t ms);
+
 void room_server_destroy(RoomServer *server);
 /*
  * Service the socket: read every pending datagram, not just one. A room

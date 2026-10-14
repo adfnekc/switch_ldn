@@ -622,6 +622,140 @@ int main(void)
         room_server_destroy(big);
     }
 
+    /* ================================================================ */
+    /* A full room must reject the next join with IdRoomIsFull           */
+    /* ================================================================ */
+    /*
+     * Eden's HandleJoinRequest returns IdRoomIsFull as soon as
+     * members.size() >= room_information.member_slots. The bridge used to stop
+     * only at its own table size, so a ninth member was accepted into a room
+     * the game opened for eight.
+     */
+    {
+        static const uint16_t FULL_PORT = (uint16_t)(PORT + 4);
+        static const uint32_t SLOTS = 2;
+        RoomServer *small = room_server_create("127.0.0.1", FULL_PORT, NULL, NULL,
+                                              "Small", "d", "h", SLOTS);
+        assert(small != NULL);
+        struct sockaddr_in a;
+        memset(&a, 0, sizeof(a));
+        a.sin_family = AF_INET;
+        a.sin_port = htons(FULL_PORT);
+        inet_pton(AF_INET, "127.0.0.1", &a.sin_addr);
+
+        uint8_t r[64];
+        /* SLOTS members join normally. */
+        for (uint32_t i = 0; i < SLOTS; i++) {
+            int s = socket(AF_INET, SOCK_DGRAM, 0);
+            assert(s >= 0);
+            struct sockaddr_in self;
+            memset(&self, 0, sizeof(self));
+            self.sin_family = AF_INET;
+            self.sin_addr.s_addr = htonl(INADDR_ANY);
+            self.sin_port = htons((uint16_t)(32000 + i));
+            assert(bind(s, (struct sockaddr *)&self, sizeof(self)) == 0);
+            assert(connect(s, (struct sockaddr *)&a, sizeof(a)) == 0);
+            char nm[16];
+            snprintf(nm, sizeof(nm), "player%u", i);
+            uint8_t jr[256];
+            size_t jl = build_join_request(jr, nm);
+            assert(send(s, jr, jl, 0) == (ssize_t)jl);
+            room_server_poll(small, 0);
+            assert(recv(s, r, sizeof(r), 0) == 5 && r[0] == IdJoinSuccess);
+            close(s);
+        }
+
+        /* The next one is told the room is full, not silently accepted. */
+        int late = socket(AF_INET, SOCK_DGRAM, 0);
+        assert(late >= 0);
+        struct sockaddr_in lself;
+        memset(&lself, 0, sizeof(lself));
+        lself.sin_family = AF_INET;
+        lself.sin_addr.s_addr = htonl(INADDR_ANY);
+        lself.sin_port = htons(32990);
+        assert(bind(late, (struct sockaddr *)&lself, sizeof(lself)) == 0);
+        assert(connect(late, (struct sockaddr *)&a, sizeof(a)) == 0);
+        uint8_t jr[256];
+        size_t jl = build_join_request(jr, "latecomer");
+        assert(send(late, jr, jl, 0) == (ssize_t)jl);
+        room_server_poll(small, 0);
+        ssize_t got = recv(late, r, sizeof(r), 0);
+        assert(got == 1); /* IdRoomIsFull carries no payload */
+        assert(r[0] == IdRoomIsFull);
+        printf("room is full after %u members: IdRoomIsFull\n", SLOTS);
+
+        /* An existing member still gets through when the room is full. */
+        int again = socket(AF_INET, SOCK_DGRAM, 0);
+        assert(again >= 0);
+        struct sockaddr_in aself;
+        memset(&aself, 0, sizeof(aself));
+        aself.sin_family = AF_INET;
+        aself.sin_addr.s_addr = htonl(INADDR_ANY);
+        aself.sin_port = htons(32000); /* same address as player0 */
+        assert(bind(again, (struct sockaddr *)&aself, sizeof(aself)) == 0);
+        assert(connect(again, (struct sockaddr *)&a, sizeof(a)) == 0);
+        size_t al = build_join_request(jr, "player0");
+        assert(send(again, jr, al, 0) == (ssize_t)al);
+        room_server_poll(small, 0);
+        assert(recv(again, r, sizeof(r), 0) == 5 && r[0] == IdJoinSuccess);
+        printf("re-sync from an existing member still succeeds when full\n");
+
+        /*
+         * But the room must not fill up for good. Both members are about to
+         * go quiet, so with a 1 ms idle timeout the next join is allowed to
+         * reclaim a slot instead of being refused - otherwise a member that
+         * closed its socket would hold the room hostage permanently.
+         */
+        room_server_set_idle_timeout_ms(small, 1);
+        close(again);
+        usleep(5 * 1000);
+
+        int next = socket(AF_INET, SOCK_DGRAM, 0);
+        assert(next >= 0);
+        struct sockaddr_in nself;
+        memset(&nself, 0, sizeof(nself));
+        nself.sin_family = AF_INET;
+        nself.sin_addr.s_addr = htonl(INADDR_ANY);
+        nself.sin_port = htons(33001);
+        assert(bind(next, (struct sockaddr *)&nself, sizeof(nself)) == 0);
+        assert(connect(next, (struct sockaddr *)&a, sizeof(a)) == 0);
+        size_t nl = build_join_request(jr, "reclaimer");
+        assert(send(next, jr, nl, 0) == (ssize_t)nl);
+        room_server_poll(small, 0);
+        assert(recv(next, r, sizeof(r), 0) == 5 && r[0] == IdJoinSuccess);
+        printf("idle members are reclaimed, so a full room is not permanent\n");
+
+        close(late);
+        close(next);
+
+        /* A bad protocol version must also reach the peer, instead of being
+         * dropped and leaving it waiting for a JoinSuccess forever. */
+        int bad = socket(AF_INET, SOCK_DGRAM, 0);
+        assert(bad >= 0);
+        struct sockaddr_in bself;
+        memset(&bself, 0, sizeof(bself));
+        bself.sin_family = AF_INET;
+        bself.sin_addr.s_addr = htonl(INADDR_ANY);
+        bself.sin_port = htons(32991);
+        assert(bind(bad, (struct sockaddr *)&bself, sizeof(bself)) == 0);
+        assert(connect(bad, (struct sockaddr *)&a, sizeof(a)) == 0);
+        uint8_t bv[128];
+        size_t bvl = 0;
+        exp_u8(bv, &bvl, IdJoinRequest);
+        exp_str(bv, &bvl, "wrongversion");
+        exp_ip(bv, &bvl, 0xFF, 0xFF, 0xFF, 0xFF);
+        exp_u32(bv, &bvl, ROOM_NETWORK_VERSION + 1u);
+        exp_str(bv, &bvl, "");
+        exp_str(bv, &bvl, "tok");
+        assert(send(bad, bv, bvl, 0) == (ssize_t)bvl);
+        room_server_poll(small, 0);
+        assert(recv(bad, r, sizeof(r), 0) == 1 && r[0] == IdVersionMismatch);
+        printf("version mismatch: IdVersionMismatch (not swallowed)\n");
+        close(bad);
+
+        room_server_destroy(small);
+    }
+
     /* ---- one poll() must drain more than one queued datagram ---- */
     /* Two members are connected, so a broadcast reaches both. Send a burst of
      * scans and confirm the bridge consumes all of them in a single poll. */

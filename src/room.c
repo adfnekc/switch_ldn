@@ -18,7 +18,21 @@ typedef struct {
     RoomMemberInfo info;
     struct sockaddr_in addr;
     socklen_t addr_len;
+    /* Monotonic ms of the last datagram from this peer. */
+    uint64_t last_seen_ms;
 } MemberSlot;
+
+/*
+ * A Room member that goes quiet for this long is treated as gone and its slot
+ * reclaimed when the room needs the space.
+ *
+ * The Room protocol has no disconnect and no heartbeat - a plain-UDP member
+ * that closes its socket just stops talking, and Eden never learns about it
+ * either. Without this the room would fill up permanently: once the bridge
+ * enforces member_slots, a member that closed its socket would keep its slot
+ * forever and the emulator could never rejoin.
+ */
+#define ROOM_MEMBER_IDLE_TIMEOUT_MS 60000u
 
 struct RoomServer {
     int fd;
@@ -31,6 +45,7 @@ struct RoomServer {
     int member_count; /* successfully joined members */
     int next_id;      /* monotonically increasing member id */
     int next_fake_ip; /* walks 192.168.i.j */
+    uint64_t member_idle_timeout_ms;
 };
 
 /* ------------------------------------------------------------------ */
@@ -214,6 +229,56 @@ static MemberSlot *find_by_id(RoomServer *s, int member_id)
     return NULL;
 }
 
+/*
+ * Drop every joined member that has been quiet for longer than
+ * ROOM_MEMBER_IDLE_TIMEOUT_MS. Active members are never touched.
+ */
+static void reclaim_idle_members(RoomServer *server, uint64_t now)
+{
+    if (!server->member_idle_timeout_ms) {
+        return; /* eviction disabled */
+    }
+    for (int i = 0; i < ROOM_MAX_MEMBERS; i++) {
+        MemberSlot *m = &server->members[i];
+        if (!m->info.in_use || !m->last_seen_ms) {
+            continue;
+        }
+        if (now - m->last_seen_ms <= server->member_idle_timeout_ms) {
+            continue;
+        }
+        LOG_W("room: member %d ('%s') idle for %llums, dropping it", m->info.id,
+              m->info.nickname,
+              (unsigned long long)(now - m->last_seen_ms));
+        if (server->handlers.on_leave) {
+            server->handlers.on_leave(server, m->info.id, server->user);
+        }
+        memset(m, 0, sizeof(*m));
+        server->member_count--;
+    }
+}
+
+/* Same, but also matches a slot that is only *reserved* for a peer that has
+ * not completed its join yet.
+ *
+ * Rejections are precisely the messages that must reach such a peer: the
+ * version mismatch, name collision and room-is-full rejects all fire before
+ * in_use is set. Looking the slot up the joined-only way makes find_by_id
+ * return NULL, the reject is never sent, and the emulator waits forever on a
+ * spinner - the exact failure this reject family exists to prevent.
+ *
+ * A free slot is all-zero, so it has id 0 and addr_len 0; member ids start at
+ * 1, which is what makes this lookup unambiguous.
+ */
+static MemberSlot *find_by_id_any(RoomServer *s, int member_id)
+{
+    for (int i = 0; i < ROOM_MAX_MEMBERS; i++) {
+        if (s->members[i].info.id == member_id && s->members[i].addr_len != 0) {
+            return &s->members[i];
+        }
+    }
+    return NULL;
+}
+
 /* Mirrors Eden's GenerateFakeIPAddress: first free 192.168.i.j. */
 static void generate_fake_ip(RoomServer *s, uint8_t out[4])
 {
@@ -300,9 +365,22 @@ static uint8_t reject_message_type(RoomRejectReason reason)
     }
 }
 
+/*
+ * Override how long a silent member keeps its slot. 0 disables eviction
+ * entirely, which is the safe default for callers that never want a member
+ * dropped implicitly.
+ */
+void room_server_set_idle_timeout_ms(RoomServer *server, uint64_t ms)
+{
+    if (!server) {
+        return;
+    }
+    server->member_idle_timeout_ms = ms;
+}
+
 void room_send_reject(RoomServer *server, int member_id, RoomRejectReason reason)
 {
-    MemberSlot *m = find_by_id(server, member_id);
+    MemberSlot *m = find_by_id_any(server, member_id);
     if (!m) {
         return;
     }
@@ -432,6 +510,34 @@ static void handle_join_request(RoomServer *server, MemberSlot *m, Packet *p)
               m->info.fake_ip[0], m->info.fake_ip[1], m->info.fake_ip[2],
               m->info.fake_ip[3]);
         room_send_join_success(server, m->info.id);
+        return;
+    }
+
+    /*
+     * Eden's HandleJoinRequest rejects a join the moment
+     * members.size() >= room_information.member_slots, so the room never runs
+     * past the number of members the game opened it for. Without this the
+     * bridge only stops at its own table size (ROOM_MAX_MEMBERS), so a ninth
+     * member is accepted into a room declared for eight people.
+     *
+     * Deliberately placed *after* the re-sync branch above: an existing member
+     * re-sending its identity must keep its place even in a full room, or it
+     * would read the IdRoomIsFull as having been dropped and lose its fake IP.
+     */
+    if ((uint32_t)server->member_count >= server->information.member_slots) {
+        /*
+         * The room is full. Before refusing, reclaim slots held by members
+         * that stopped talking: this is what stops the room from filling up
+         * for good once an emulator closes its socket.
+         */
+        reclaim_idle_members(server, now_ms());
+    }
+
+    if ((uint32_t)server->member_count >= server->information.member_slots) {
+        LOG_W("room: member %d ('%s') rejected, room is full (%u/%u members)",
+              m->info.id, nickname, (unsigned)server->member_count,
+              server->information.member_slots);
+        room_send_reject(server, m->info.id, RoomRejectRoomIsFull);
         return;
     }
 
@@ -628,6 +734,7 @@ RoomServer *room_server_create(const char *bind_addr, uint16_t port,
     s->next_fake_ip = 0;
     s->member_count = 0;
     s->next_id = 0;
+    s->member_idle_timeout_ms = ROOM_MEMBER_IDLE_TIMEOUT_MS;
 
     snprintf(s->information.name, sizeof(s->information.name), "%s",
              room_name && *room_name ? room_name : "switch_ldn");
@@ -722,6 +829,8 @@ static void room_service_one(RoomServer *server)
         is_new = true;
     }
 
+    /* Anything at all counts as proof of life, including re-joins. */
+    m->last_seen_ms = now_ms();
     Packet p;
     pk_begin(&p);
     memcpy(p.buf, buf, (size_t)n);
