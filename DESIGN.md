@@ -243,9 +243,17 @@ make test
 | `tests/test_wire.c` | RyuLdn struct sizes (12 / 0x40 / 0x480 / 0x500 / 0xBC), LDN payload sizes, channel encoding, session-info layout, AES-CTR round-trip, key derivation determinism, and `CreateAccessPointRequest` field offsets + passphrase extraction |
 | `tests/test_p1_refused.c` | socket-level: a guest sending `Connect` (p1) gets `NetworkError(ConnectionRejected)` rather than silence |
 | `tests/test_handshake.c` | socket-level: the RyuLdn handshake — `Initialize` must be answered with an `Initialize` carrying an assigned session id + MAC, and `Ping` with `{requester=0, id}`. Both were wrong before this existed. |
-| `tests/test_room_wire.c` | socket-level: Room wire format — a hand-built `IdJoinRequest` decodes to a 5-byte `IdJoinSuccess`, fake IPs are allocated from `192.168.x.y` without collision, `IdLdnPacket{Scan}` and `IdProxyPacket` decode field-for-field, and `IdRoomInformation` re-walks to the right member count. |
+| `tests/test_room_wire.c` | socket-level: Room wire format — a hand-built `IdJoinRequest` decodes to a 5-byte `IdJoinSuccess`, fake IPs are allocated from `192.168.x.y` without collision, `IdLdnPacket{Scan}` and `IdProxyPacket` decode field-for-field, the trailing LDN passphrase is surfaced (or correctly absent), and `IdRoomInformation` re-walks to the right member count. |
+| `tests/test_ctr_vectors.c` | The AES-CTR counter block, byte-for-byte, against vectors generated with PyCryptodome under `nonce || 0^12` (`tests/ctr_vectors.h`) |
+| `tests/test_auth_frame.c` | The LDN authentication frame layout: field order, little-/big-endian choices and the no-truncation guarantee on the response payload |
+| `tests/test_advert_nonce.c` | The 4-byte advertisement nonce: changes per emission, advances by exactly one, carries on wrap, survives a reconfigure |
+| `tests/test_host_watchdog.c` | Station bookkeeping on join (`last_seen_ms` / `joined_ms`), that the default 30 s timeout is preserved, and that a timed-out station is evicted and produces a `HOST_EVENT_STATION_LEFT` |
 
 Every expected byte string is transcribed from Eden's own encoders.
+
+`make interop` is a separate, non-hardware end-to-end check: it runs the real
+transports (radio stubbed) against a source-based RyuLdn peer and an Eden
+`Room` peer. See [tests/interop/README.md](tests/interop/README.md).
 
 ## The AES-CTR counter block (resolved)
 

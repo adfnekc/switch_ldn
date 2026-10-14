@@ -27,6 +27,7 @@ static uint8_t g_first_fake_ip[4] = {0xFF, 0xFF, 0xFF, 0xFF};
 static uint8_t g_passphrase[64];
 static uint32_t g_passphrase_len;
 static bool g_scan_decoded;
+static uint8_t g_scan_type;
 static uint64_t g_game_id;
 static char g_game_name[200];
 static char g_game_version[16];
@@ -60,6 +61,15 @@ static void on_packet(RoomServer *server, int member_id, const RoomPacketIn *pkt
         g_game_id = pkt->game_id;
         snprintf(g_game_name, sizeof(g_game_name), "%s", pkt->game_name);
         snprintf(g_game_version, sizeof(g_game_version), "%s", pkt->game_version);
+    } else if (pkt->type == IdLdnPacket) {
+        g_scan_decoded = true;
+        g_scan_type = pkt->ldn_packet_type;
+        g_passphrase_len = pkt->passphrase_len;
+        if (pkt->passphrase_len) {
+            memcpy(g_passphrase, pkt->passphrase,
+                   pkt->passphrase_len < sizeof(g_passphrase) ? pkt->passphrase_len
+                                                              : sizeof(g_passphrase));
+        }
     }
 }
 
@@ -250,6 +260,8 @@ int main(void)
     uint8_t scan[256];
     size_t scan_len = 0;
     g_passphrase_len = 0;
+    g_scan_decoded = false;
+    g_scan_type = 0xFF;
     exp_u8(scan, &scan_len, IdLdnPacket);
     exp_u8(scan, &scan_len, LDNPacketTypeScan);
     exp_ip(scan, &scan_len, 192, 168, 0, 1); /* local_ip  */
@@ -280,7 +292,20 @@ int main(void)
         usleep(3 * 1000);
     }
     assert(g_packets == before + 1);
-    printf("IdLdnPacket{Scan} decoded (%zu bytes)\n", scan_len);
+
+    /* The packet must actually reach the handler as a Scan, and the trailing
+     * passphrase - the whole point of patches/eden-room-passphrase.patch -
+     * must be surfaced (or correctly absent) rather than silently dropped. */
+    assert(g_scan_decoded);
+    assert(g_scan_type == LDNPacketTypeScan);
+    if (with_passphrase) {
+        assert(g_passphrase_len == 4);
+        assert(memcmp(g_passphrase, "PIA!", 4) == 0);
+    } else {
+        assert(g_passphrase_len == 0);
+    }
+    printf("IdLdnPacket{Scan} decoded (%zu bytes, passphrase=%u)\n", scan_len,
+           g_passphrase_len);
 
     /* ================================================================ */
     /* IdProxyPacket in Eden's encoding: 4 endpoint fields + payload       */

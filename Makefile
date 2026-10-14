@@ -12,8 +12,9 @@ BIN    := switch_ldn
 SRCS := $(wildcard $(SRCDIR)/*.c)
 OBJS := $(patsubst $(SRCDIR)/%.c,$(OBJDIR)/%.o,$(SRCS))
 TEST_OBJS := build/crypto.o build/ldn.o build/ryuldn.o build/room.o build/radio.o build/util.o
+BRIDGE_OBJS := build/crypto.o build/ldn.o build/ryuldn.o build/room.o build/radio.o build/util.o build/host.o
 
-.PHONY: all clean check test
+.PHONY: all clean check test interop
 
 all: $(BIN)
 
@@ -27,7 +28,7 @@ $(OBJDIR):
 	mkdir -p $(OBJDIR)
 
 clean:
-	rm -rf $(OBJDIR) $(BIN)
+	rm -rf $(OBJDIR) $(BIN) build/room_peer
 
 # ---------------------------------------------------------------------------
 # Tests. All of them are socket-level and need no radio hardware.
@@ -54,6 +55,9 @@ test: $(TEST_OBJS)
 	$(CC) $(CFLAGS) $(CPPFLAGS) -Isrc -o build/test_advert_nonce tests/test_advert_nonce.c \
 	    build/host.o $(TEST_OBJS) $(LDLIBS)
 	./build/test_advert_nonce
+	$(CC) $(CFLAGS) $(CPPFLAGS) -Isrc -o build/test_host_watchdog tests/test_host_watchdog.c \
+	    build/host.o $(TEST_OBJS) $(LDLIBS)
+	./build/test_host_watchdog
 
 # ---------------------------------------------------------------------------
 # CLI smoke test, also without radio hardware.
@@ -72,3 +76,24 @@ check: $(BIN)
 	        echo "  $$opt: removed"; \
 	    else echo "  $$opt: STILL PRESENT"; exit 1; fi; \
 	done
+
+
+# ---------------------------------------------------------------------------
+# Interop: real Ryubing-style client talking to the bridge's real transports.
+# ---------------------------------------------------------------------------
+build/bridge_harness: tests/bridge_harness.c $(BRIDGE_OBJS) | $(OBJDIR)
+	$(CC) $(CFLAGS) $(CPPFLAGS) -Isrc -o $@ $< $(BRIDGE_OBJS) $(LDLIBS)
+
+# Source-based Eden/yuzu Room peer. Compiles on demand; never committed.
+build/room_peer: tests/interop/room/room_peer.cpp tests/interop/room/packet.cpp \
+                 tests/interop/room/packet.h tests/interop/room/common_types.h | $(OBJDIR)
+	g++ -std=c++20 -O2 -Wall -Wextra -Itests/interop/room -o $@ \
+	    tests/interop/room/room_peer.cpp tests/interop/room/packet.cpp
+
+interop: build/bridge_harness build/room_peer tests/interop/prod.keys
+	@./build/bridge_harness >build/interop.log 2>&1 & bp=$$!; \
+	  for i in $$(seq 1 50); do grep -q "HARNESS: ready" build/interop.log 2>/dev/null && break; sleep 0.1; done; \
+	  echo "--- RyuLdn peer ---"; python3 tests/interop/ryu_peer.py; r1=$$?; \
+	  echo "--- Room peer ---"; ./build/room_peer; r2=$$?; \
+	  kill $$bp 2>/dev/null || true; wait $$bp 2>/dev/null || true; \
+	  if [ $$r1 -eq 0 ] && [ $$r2 -eq 0 ]; then exit 0; else exit 1; fi

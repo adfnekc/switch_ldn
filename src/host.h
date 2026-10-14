@@ -24,6 +24,7 @@
 
 #define HOST_MAX_STATIONS 8
 
+
 typedef struct {
     bool in_use;
     bool associated;    /* 802.11 assoc done, IP assigned */
@@ -89,11 +90,25 @@ int host_adopt_guest_settings(Host *host, uint64_t title_id, uint16_t channel,
 void host_set_app_data(Host *host, const uint8_t *data, uint16_t size);
 void host_sync_station_list(Host *host);
 
+/*
+ * Refresh a station's last-seen timestamp. Called whenever LDN traffic
+ * arrives from an already-joined station (see the watchdog in host_tick()).
+ * Does nothing for an out-of-range or unused slot.
+ */
+void host_touch_station(Host *host, int index);
+
+/*
+ * Set the station watchdog timeout in milliseconds (default 30 s). Passing 0
+ * is a no-op so a caller cannot accidentally disable the watchdog.
+ */
+void host_set_station_timeout_ms(Host *host, uint64_t ms);
+
 /* Per-frame dispatch. Returns true if the frame was consumed. */
 bool host_handle_frame(Host *host, Radio *radio, const RadioFrame *frame);
 
 /* Emit a fresh advertisement if the 100 ms deadline passed. */
 void host_tick(Host *host, Radio *radio);
+
 
 /*
  * Override node 0 (the guest) in the advertisement: username, MAC and Pia
@@ -132,7 +147,5 @@ const LdnSessionInfo *host_session_info(const Host *host);
 
 /* The wire-format advertisement nonce (4 bytes, big-endian). */
 const uint8_t *host_nonce(const Host *host);
-
-
 
 #endif /* SWITCH_LDN_HOST_H */

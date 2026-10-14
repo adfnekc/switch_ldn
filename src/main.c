@@ -229,13 +229,19 @@ static void deliver_from_guest(Bridge *b, RyuLdnProxyInfo info, const uint8_t *d
 
 static void build_network_info(Bridge *b, RyuLdnNetworkInfo *info)
 {
+    /* The radio is optional (the interop harness runs without one), so fall
+     * back to an all-zero MAC instead of dereferencing a null Radio. */
+    static const uint8_t zero_mac[6] = {0};
+    const RadioConfig *rcfg = radio_config(b->radio);
+    const uint8_t *own_mac = rcfg ? rcfg->mac : zero_mac;
+
     ryuldn_network_info_init(info);
 
     /* network_id = intent id (title id in the first 8 bytes) */
     wr_le64(info->network_id, b->title_id);
 
     /* CommonNetworkInfo: mac, ssid, channel, link level, network type */
-    memcpy(info->common, radio_config(b->radio)->mac, 6);
+    memcpy(info->common, own_mac, 6);
     memset(info->common + 6, 0, 34);
     wr_le16(info->common + 40, b->channel);
     wr_le16(info->common + 42, 3); /* link level: "good" */
@@ -262,7 +268,7 @@ static void build_network_info(Bridge *b, RyuLdnNetworkInfo *info)
 
         RyuLdnNodeInfo *node = &info->nodes[count];
         node->ipv4_address = (i == 0) ? b->guest_proxy_ip : st->ipv4;
-        memcpy(node->mac, i == 0 ? radio_config(b->radio)->mac : st->mac, 6);
+        memcpy(node->mac, i == 0 ? own_mac : st->mac, 6);
         node->node_id = (uint8_t)count;
         node->is_connected = 1;
         strncpy(node->user_name, st->username, sizeof(node->user_name) - 1);

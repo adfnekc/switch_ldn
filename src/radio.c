@@ -401,7 +401,11 @@ void radio_close(Radio *radio)
 
 int radio_send(Radio *radio, const uint8_t *frame, size_t len)
 {
-    if (!radio || radio->ap_fd < 0 || len < 2) {
+    if (!radio) {
+        LOG_W("radio_send: no radio attached");
+        return -1;
+    }
+    if (radio->ap_fd < 0 || len < 2) {
         return -1;
     }
     ssize_t n = send(radio->ap_fd, frame, len, MSG_DONTWAIT);
@@ -414,7 +418,11 @@ int radio_send(Radio *radio, const uint8_t *frame, size_t len)
 
 int radio_send_action_frame(Radio *radio, const uint8_t *body, size_t len)
 {
-    if (!radio || radio->mon_fd < 0) {
+    if (!radio) {
+        LOG_W("radio_send_action_frame: no radio attached");
+        return -1;
+    }
+    if (radio->mon_fd < 0) {
         LOG_E("no monitor interface configured for action frame injection");
         return -1;
     }
@@ -439,6 +447,10 @@ int radio_send_action_frame(Radio *radio, const uint8_t *body, size_t len)
 
 void radio_poll(Radio *radio, int timeout_ms)
 {
+    if (!radio) {
+        LOG_W("radio_poll: no radio attached");
+        return;
+    }
     struct pollfd fds[2];
     fds[0].fd = radio->ap_fd;
     fds[0].events = POLLIN;

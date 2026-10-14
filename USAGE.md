@@ -10,6 +10,17 @@
 
 ---
 
+## 兼容性矩阵
+
+两套传输、一个 LDN 核心，同时监听，切换模拟器不用重新配置。
+
+| 模拟器家族 | 协议 | 端口 | 状态 | 备注 |
+|---|---|---|---|---|
+| **Ryubing**（Ryujinx fork） | RyuLdn over TCP | `30456` | ✅ | 游戏的 `CreateNetwork` 原样转发，无需逐游戏配置 |
+| **Ryujinx**（pre-2024） | RyuLdn over TCP | `30456` | ✅ | 同上 |
+| **Eden** | Room over UDP | `24872` | ✅ | 需先打 `patches/eden-room-passphrase.patch` |
+| **Citron / Sudachi / yuzu** | Room over UDP | `24872` | ✅ | 同 Eden |
+
 ## 场景 A：Ryubing（最省事，推荐先跑通）
 
 ```bash
@@ -161,11 +172,20 @@ mt7921au 这类内核原生支持好的芯片会省事很多。
 
 ## 什么时候会静默失败
 
+下面这些是桥不会提前拦截、只能靠现象排查的失败；以前"看着连上了却真机搜不到/进不去"的路径现在都会明确报错，不再静默。
+
 | 现象 | 大概率原因 |
 |---|---|
 | 真机完全搜不到房间 | 信道不匹配；或 monitor 接口注入失败（看日志有没有 advertisement） |
 | 真机能看到房但进不去 | 密语不对，或游戏版本不匹配（游戏自己比 `local_communication_version`） |
 | 模拟器侧一直转圈 | 端口没连到桥；Room 路径检查补丁是否已打 |
+
+桥现在会明确报错、不再静默失败的情况：
+
+- Eden 未打补丁：`ERROR Room transport: cannot build the LDN network for title ...,
+  because the LDN crypto passphrase never arrived.`
+- 认证请求的 session_info（title id + scene id）与桥不一致：按 malformed（status 2）拒掉
+- p1（模拟器加入真机房间）：返回 `NetworkError(ConnectionRejected)`，不挂起
 
 AES-CTR counter block 布局已经用 kinnay/LDN 的参考向量钉死了（`tests/test_ctr_vectors.c`），
 不再是未知项；`ChallengeResponse` 也不需要——真机根本不解析房主回的 challenge

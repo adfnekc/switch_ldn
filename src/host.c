@@ -11,6 +11,9 @@ typedef struct Host {
     LdnHost pub;
     uint64_t adv_expire_ms;
 
+    /* A joined station that has not been heard from for this long is evicted. */
+    uint64_t station_timeout_ms;
+
     /* Ring of join/leave events for the transports to drain. */
     HostEvent events[16];
     int event_head, event_count;
@@ -211,6 +214,7 @@ Host *host_create(const ProdKeys *prodkeys, uint64_t title_id, uint16_t channel,
     }
 
     host->pub.prodkeys = prodkeys;
+    host->station_timeout_ms = 30000;
 
     if (host_configure(host, title_id, channel, band, node_count_max, passphrase,
                        passphrase_len, host_username, app_comm_version) != 0) {
@@ -239,6 +243,55 @@ int host_adopt_guest_settings(Host *host, uint64_t title_id, uint16_t channel,
 
     return host_configure(host, title_id, channel, host->pub.band, node_count_max,
                           passphrase, passphrase_len, username, app_comm_version);
+}
+
+
+void host_set_guest_identity(Host *host, const char *username, const uint8_t mac[6],
+                             uint16_t app_comm_version)
+{
+    if (!host) {
+        return;
+    }
+    HostStation *self = &host->pub.stations[0];
+    self->in_use = true;
+    self->associated = true;
+    self->ldn_joined = true;
+    self->platform = LDN_PLATFORM_SWITCH;
+    if (username && *username) {
+        snprintf(self->username, sizeof(self->username), "%s", username);
+    }
+    if (mac) {
+        memcpy(self->mac, mac, 6);
+    }
+    self->app_communication_version = app_comm_version;
+}
+
+int host_station_count(const Host *host)
+{
+    if (!host) {
+        return 0;
+    }
+    return host->pub.station_count;
+}
+
+void host_touch_station(Host *host, int index)
+{
+    if (!host || index < 0 || index >= HOST_MAX_STATIONS) {
+        return;
+    }
+    HostStation *st = &host->pub.stations[index];
+    if (!st->in_use) {
+        return;
+    }
+    st->last_seen_ms = now_ms();
+}
+
+void host_set_station_timeout_ms(Host *host, uint64_t ms)
+{
+    if (!host || ms == 0) {
+        return;
+    }
+    host->station_timeout_ms = ms;
 }
 
 void host_destroy(Host *host)
@@ -312,35 +365,62 @@ const uint8_t *host_nonce(const Host *host)
 void host_tick(Host *host, Radio *radio)
 {
     uint64_t now = now_ms();
-    if (now < host->adv_expire_ms) {
-        return;
+
+    if (now >= host->adv_expire_ms) {
+        host->adv_expire_ms = now + 100;
+        host_sync_station_list(host);
+
+        /*
+         * The advertisement nonce must advance on every frame. A console's LDN
+         * stack compares it against the previous one to tell a fresh
+         * advertisement from a stale duplicate, so a constant nonce makes every
+         * 100 ms frame look like a replay of the first and the player list is
+         * never refreshed.
+         */
+        advance_advert_nonce(host->pub.nonce);
+
+        const uint8_t *mac = radio ? radio_config(radio)->mac
+                                   : host->pub.stations[0].mac;
+        uint8_t frame[IEEE80211_HDRLEN + LDN_ACTION_BODY_PREFIX_SIZE +
+                      LDN_ADVERTISEMENT_PAYLOAD_SIZE];
+        int n = ldn_build_advertisement_action_frame(
+            frame, sizeof(frame), mac, &host->pub.session_info, &host->pub.adv_data,
+            host->pub.prodkeys, host->pub.security_level, host->pub.nonce, NULL);
+        if (n < 0) {
+            LOG_E("failed to build advertisement");
+        } else {
+            size_t len = (size_t)(n > 0 ? n : 0);
+            if (radio) {
+                radio_send_action_frame(radio, frame, len);
+            } else {
+                LOG_W("host_tick: no radio attached; advertisement not transmitted");
+            }
+        }
     }
-    host->adv_expire_ms = now + 100;
-    host_sync_station_list(host);
 
     /*
-     * The advertisement nonce must advance on every frame. A console's LDN
-     * stack compares it against the previous one to tell a fresh advertisement
-     * from a stale duplicate, so a constant nonce makes every 100 ms frame look
-     * like a replay of the first and the player list is never refreshed.
+     * Station watchdog. hostapd owns 802.11 association and keep-alive; what we
+     * can observe is LDN traffic, so `last_seen_ms` is touched by every LDN
+     * authentication frame. A station that goes quiet for longer than
+     * station_timeout_ms is presumed gone: tell the transports, free the slot,
+     * and let the advertisement shrink on the next emission.
      */
-    advance_advert_nonce(host->pub.nonce);
-
-    const uint8_t *mac = radio ? radio_config(radio)->mac : host->pub.stations[0].mac;
-    uint8_t frame[IEEE80211_HDRLEN + LDN_ACTION_BODY_PREFIX_SIZE + LDN_ADVERTISEMENT_PAYLOAD_SIZE];
-    int n = ldn_build_advertisement_action_frame(
-        frame, sizeof(frame), mac, &host->pub.session_info, &host->pub.adv_data,
-        host->pub.prodkeys, host->pub.security_level, host->pub.nonce, NULL);
-    if (n < 0) {
-        LOG_E("failed to build advertisement");
-        return;
-    }
-    size_t len = (size_t)(n > 0 ? n : 0);
-
-    if (radio) {
-        radio_send_action_frame(radio, frame, len);
-    } else {
-        hex_dump("adv: ", frame, 64);
+    for (int i = 1; i < HOST_MAX_STATIONS; i++) {
+        HostStation *st = &host->pub.stations[i];
+        if (!st->in_use || st->last_seen_ms == 0) {
+            continue;
+        }
+        if (now - st->last_seen_ms > host->station_timeout_ms) {
+            LOG_W("station %02x:%02x:%02x:%02x:%02x:%02x: timed out after "
+                  "%llums, broadcasting leave",
+                  st->mac[0], st->mac[1], st->mac[2], st->mac[3], st->mac[4],
+                  st->mac[5], (unsigned long long)(now - st->last_seen_ms));
+            host_push_event(host, HOST_EVENT_STATION_LEFT, i);
+            memset(st, 0, sizeof(*st));
+            if (host->pub.station_count > 0) {
+                host->pub.station_count--;
+            }
+        }
     }
 }
 
@@ -378,6 +458,11 @@ static void reject_auth(Host *host, Radio *radio, const LdnAuthData *auth,
     memcpy(rej.server_random, auth->server_random, 16);
     memcpy(rej.client_random, auth->client_random, 16);
 
+    if (!radio) {
+        LOG_W("reject_auth: no radio attached");
+        return;
+    }
+
     uint8_t buf[IEEE80211_HDRLEN + LDN_AUTH_HEADER_SIZE +
                 LDN_AUTH_RESPONSE_PAYLOAD];
     size_t len = 0;
@@ -388,13 +473,29 @@ static void reject_auth(Host *host, Radio *radio, const LdnAuthData *auth,
     }
 }
 
+
+static const uint8_t *host_mac(const Host *host, const Radio *radio)
+{
+    if (radio) {
+        return radio_config(radio)->mac;
+    }
+    return host->pub.stations[0].mac;
+}
+
 bool host_handle_frame(Host *host, Radio *radio, const RadioFrame *frame)
 {
+    if (!host || !frame) {
+        return false;
+    }
+    if (!radio) {
+        LOG_W("host_handle_frame: no radio attached");
+    }
+
     /* Only respond to frames addressed to our BSSID/MAC. */
     if (frame->frame_len < IEEE80211_HDRLEN + 8) {
         return false;
     }
-    if (memcmp(frame->dst_mac, radio_config(radio)->mac, 6) != 0) {
+    if (memcmp(frame->dst_mac, host_mac(host, radio), 6) != 0) {
         return false;
     }
 
@@ -490,6 +591,15 @@ bool host_handle_frame(Host *host, Radio *radio, const RadioFrame *frame)
             return true;
         }
 
+        if (memcmp(frame->src_mac, host_mac(host, radio), 6) == 0) {
+            LOG_W("station %02x:%02x:%02x:%02x:%02x:%02x rejected: MAC collides "
+                  "with the host/AP MAC",
+                  frame->src_mac[0], frame->src_mac[1], frame->src_mac[2],
+                  frame->src_mac[3], frame->src_mac[4], frame->src_mac[5]);
+            reject_auth(host, radio, &auth, LDN_AUTH_MALFORMED_REQUEST);
+            return true;
+        }
+
         int idx = host_station_index_by_mac(host, frame->src_mac);
         if (idx < 0) {
             for (int i = 1; i < HOST_MAX_STATIONS; i++) {
@@ -513,6 +623,7 @@ bool host_handle_frame(Host *host, Radio *radio, const RadioFrame *frame)
             st->app_communication_version = auth.app_communication_version;
             st->ipv4 = alloc_station_ip(host, idx);
             st->last_seen_ms = now_ms();
+            st->joined_ms = st->last_seen_ms;
             host->pub.station_count++;
             host_push_event(host, HOST_EVENT_STATION_JOINED, idx);
             LOG_I("station joined: %02x:%02x:%02x:%02x:%02x:%02x slot=%d ip=%u.%u.%u.%u",
@@ -521,7 +632,7 @@ bool host_handle_frame(Host *host, Radio *radio, const RadioFrame *frame)
                   (st->ipv4 >> 8) & 0xFF, st->ipv4 & 0xFF);
         }
 
-        host->pub.stations[idx].last_seen_ms = now_ms();
+        host_touch_station(host, idx);
 
         /* Auth response: always Success (status 0). As host we do not have to
          * prove anything; Nintendo's challenge just guards against a single
@@ -541,6 +652,10 @@ bool host_handle_frame(Host *host, Radio *radio, const RadioFrame *frame)
 
         uint8_t out[IEEE80211_HDRLEN + LDN_AUTH_HEADER_SIZE + LDN_AUTH_RESPONSE_PAYLOAD];
         size_t payload_len = 0;
+        if (!radio) {
+            LOG_W("host_handle_frame: no radio attached; auth response not sent");
+            return true;
+        }
         int n = ldn_build_auth_frame(out, sizeof(out), radio_config(radio)->mac,
                                      radio_config(radio)->mac, &resp, &payload_len);
         if (n > 0) {

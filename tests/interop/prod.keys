@@ -1,0 +1,6 @@
+# Synthetic prod.keys for bridge<->emulator interop.
+# The emulator side never touches the LDN console crypto (that only guards the
+# 802.11 leg against a real Switch), so any 16-byte values work here.
+master_key_00 = 00112233445566778899aabbccddeeff
+aes_kek_generation_source = 1f0a4055c7fbbf0b8c8e4a3f2b1c0d9e
+aes_key_generation_source = 4d8e7f8a9b0c1d2e3f4a5b6c7d8e9f00

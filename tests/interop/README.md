@@ -1,0 +1,68 @@
+# Interop tests
+
+These tests drive the bridge's **real transports** with peers built from the
+emulators' own protocol code. No hardware and no prebuilt binaries are
+involved: everything here is source that `make interop` compiles and runs.
+
+```
+make interop
+```
+
+builds three things and wires them together:
+
+| Piece | Path | What it is |
+|---|---|---|
+| `build/bridge_harness` | `tests/bridge_harness.c` | The bridge with the radio stubbed out. It `#include`s `src/main.c` (renaming `main`) so it runs the *same* transports and LDN core as the real binary, minus `radio_open()` and the argument parser. Listens on RyuLdn TCP `30456` and Room UDP `24872`. |
+| `tests/interop/ryu_peer.py` | Python | Replays a real Ryubing/Ryujinx client's handshake: `Passphrase` → `Initialize` → `Ping` → `CreateAccessPoint`, then reads the `ProxyConfig` and `NetworkInfo` the bridge answers with. |
+| `build/room_peer` | `tests/interop/room/room_peer.cpp` | Eden/yuzu `Room` member. It is compiled against Eden's own `packet.cpp`/`packet.h` (copied from upstream, the only edit being the `#include` path), so the bytes on the wire are the bytes Eden would send. |
+
+The interop target requires the RyuLdn peer to see `createAccessPoint` and the
+Room peer to reach `IdJoinSuccess`; either failing fails `make interop`.
+
+## RyuLdn peer (`ryu_peer.py`)
+
+Plain TCP against `127.0.0.1:30456`. The frame layout mirrors the C#
+`StructLayout` types in Ryubing/Ryujinx (magic `RLDN`, version, type, length),
+not a hand-simplified version.
+
+Expected transcript:
+
+```
+>>> type=1 Passphrase                   140 bytes
+>>> type=0 Initialize                    34 bytes
+<<< type=0 data=22 bytes                  (session id + locally-administered MAC)
+>>> type=254 Ping                        14 bytes
+<<< type=254 data=2 bytes
+>>> type=2 CreateAccessPoint            200 bytes
+<<< type=17 data=8 bytes                 (ProxyConfig)
+<<< type=15 data=1152 bytes              (NetworkInfo)
+```
+
+## Room peer (`room_peer.cpp`)
+
+Plain UDP against `127.0.0.1:24872`, so no ENet dependency. It sends the exact
+packet sequence `RoomMember::RoomMemberImpl` sends:
+
+1. `IdJoinRequest` — nickname string, preferred fake IP (`0xff,0xff,0xff,0xff`),
+   network version `u32`, room password string, token string.
+2. `IdSetGameInfo` — game name string, **game id `u64`**, version string.
+3. `IdProxyPacket` — four endpoint fields plus the payload.
+4. `IdLdnPacket{Scan}` — scan request with the passphrase appended as one more
+   length-prefixed blob (the `patches/eden-room-passphrase.patch` extension;
+   stock Eden simply sends nothing extra and the trailing `passphrase_len`
+   stays `0`).
+
+Expected transcript:
+
+```
+[PASS] join.success - reply id=2 (want 2)
+[PASS] game_info.send - name='Pokemon Scarlet' id=01006F8002320000
+[PASS] proxy_packet.send - 7-byte payload
+[PASS] ldn_scan.send - scan + 15-byte passphrase
+```
+
+## `prod.keys`
+
+`tests/interop/prod.keys` is **synthetic**. The emulator leg never touches the
+LDN console crypto (that only guards the 802.11 leg against a real Switch), so
+any 16-byte values work; the harness only needs the file to parse.

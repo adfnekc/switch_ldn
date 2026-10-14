@@ -92,9 +92,16 @@ the emulator's game creates its network.
 
 ```bash
 make            # needs libssl-dev
-make test       # 6 suites, all socket-level, no hardware required
+make test       # 8 suites, all socket-level, no hardware required
 make check      # CLI smoke test
+make interop    # real RyuLdn + Room peers against the bridge (no radio)
 ```
+
+The interop target builds `tests/bridge_harness` (the bridge with the radio
+stubbed out) and drives it with two source-based peers: a RyuLdn peer that
+replays a real Ryubing/Ryujinx handshake, and an Eden `Room` peer built from
+Eden's own `packet.cpp`. Both peers are plain source, no prebuilt binaries. See
+[tests/interop/README.md](tests/interop/README.md).
 
 ## Run
 
@@ -149,11 +156,13 @@ host-to-station direction, and there is nothing left to guess about them.
 
 ## Status
 
-Builds clean under `-Wall -Wextra`; 7 test suites pass.
+Builds clean under `-Wall -Wextra`; 8 test suites pass, plus `make interop`.
 
 Validated without hardware: prod.keys parsing, key derivation, advertisement
 frame construction, RyuLdn wire layout and handshake, Room wire layout and fake
-IP allocation, adopting the guest's `CreateNetwork` settings, and refusing p1.
+IP allocation, adopting the guest's `CreateNetwork` settings, the station
+watchdog, and refusing p1. A GitHub Actions workflow runs build + test + check +
+interop on every push.
 
 **Not yet validated** (needs the RTL8812AU and a real console): radio I/O,
 action-frame injection, and the end-to-end handshake. The `ChallengeResponse`

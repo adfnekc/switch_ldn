@@ -1,0 +1,17 @@
+# Build artifacts
+/build/
+/switch_ldn
+*.o
+*.a
+*.so
+
+# On-demand interop peer build artifact
+build/room_peer
+
+# Test/interop logs
+build/interop.log
+build/interop.pid
+
+# Editor/OS
+.DS_Store
+*.swp
