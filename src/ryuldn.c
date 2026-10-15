@@ -537,6 +537,19 @@ static void handle_packet(RyuLdnServer *server, RyuSessionImpl *s, uint8_t type,
         if (len > (uint32_t)sizeof(RyuLdnProxyDataHeader)) {
             RyuLdnProxyDataHeader h;
             memcpy(&h, payload, sizeof(h));
+            /*
+             * data_length comes from the guest's own header, so without this
+             * a peer could claim far more than it actually sent and the relay
+             * would hand that length to build_udp_frame(). That path bounds-
+             * checks, so it is not readable memory - but the guest would also
+             * be told nothing about why its traffic vanished.
+             */
+            if (h.data_length > len - sizeof(h)) {
+                LOG_E("session %d: ProxyData claims %u bytes but only %u arrived, "
+                      "dropping it",
+                      s->fd, h.data_length, len - (uint32_t)sizeof(h));
+                break;
+            }
             if (server->handlers.on_proxy_data) {
                 server->handlers.on_proxy_data(session, h.info, payload + sizeof(h),
                                                h.data_length, server->user);

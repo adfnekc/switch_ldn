@@ -193,10 +193,18 @@ mt7921au 这类内核原生支持好的芯片会省事很多。
 - p1（模拟器加入真机房间）：返回 `NetworkError(ConnectionRejected)`，不挂起
 - Room 里房间已满 / 协议版本不匹配：直接回 `IdRoomIsFull` / `IdVersionMismatch`，
   不再把拒绝报文丢掉让模拟器一直转圈
+- 游戏流量发往已不存在的 LDN 地址、或 payload 放不进一个 802.11 帧、或发送失败：
+  `LOG_E` 明确说明丢的是什么
 
 Room 的成员表有一条 60 秒静默回收（`room_server_set_idle_timeout_ms` 可调，设 0 关闭）:
 Room 协议本身没有断连也没有心跳，一个关掉的成员会一直占着位置，所以桥会在房间需要
 空位时回收静默超限的成员，否则房间会被永久占满、之后谁都进不来。活跃成员不受影响。
+
+还有一个已知限制：如果 `CreateAccessPoint` 因为 host 创建失败（prod.keys 不完整、
+passphrase 为空）而中途放弃，桥会在日志里写清楚原因，但**不会**给模拟器发
+`NetworkError`——桥目前只确认过 `None(0)` 和 `ConnectionRejected(202)` 两个错误码，
+编一个新的码有可能让模拟器误报，那比超时更糟。所以这里选择让模拟器超时，原因落在桥的
+日志里。等真机联调时如果能确认 Ryujinx/Ryubing 的 `NetworkError` 完整枚举，再补上。
 
 AES-CTR counter block 布局已经用 kinnay/LDN 的参考向量钉死了（`tests/test_ctr_vectors.c`），
 不再是未知项；`ChallengeResponse` 也不需要——真机根本不解析房主回的 challenge

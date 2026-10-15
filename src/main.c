@@ -260,8 +260,15 @@ static void deliver_from_guest(Bridge *b, RyuLdnProxyInfo info, const uint8_t *d
             }
         }
         if (!found) {
-            LOG_T("guest sent to unknown LDN IP %u.%u.%u.%u", (dest_host >> 24) & 0xFF,
-                  (dest_host >> 16) & 0xFF, (dest_host >> 8) & 0xFF, dest_host & 0xFF);
+            /*
+             * Not TRACE: a guest that keeps sending to an address we no longer
+             * know (a console that left, or a network we just rebuilt) must be
+             * visible at the default log level, or it looks like the console
+             * is dropping traffic while the emulator retries forever.
+             */
+            LOG_W("guest sent to unknown LDN IP %u.%u.%u.%u (no such station)",
+                  (dest_host >> 24) & 0xFF, (dest_host >> 16) & 0xFF,
+                  (dest_host >> 8) & 0xFF, dest_host & 0xFF);
             return;
         }
     }
@@ -271,9 +278,16 @@ static void deliver_from_guest(Bridge *b, RyuLdnProxyInfo info, const uint8_t *d
         frame, sizeof(frame), radio_config(b->radio)->mac, dst_mac,
         b->guest_proxy_ip, info.dest_ipv4, info.source_port, info.dest_port, data, len);
     if (!n) {
+        LOG_E("guest->radio: %zu-byte payload does not fit in a 802.11 frame, "
+              "dropping it",
+              len);
         return;
     }
-    radio_send(b->radio, frame, n);
+    if (radio_send(b->radio, frame, n) != 0) {
+        LOG_E("guest->radio: could not transmit to %02x:%02x:%02x:%02x:%02x:%02x",
+              dst_mac[0], dst_mac[1], dst_mac[2], dst_mac[3], dst_mac[4], dst_mac[5]);
+        return;
+    }
     LOG_T("guest->radio %zu bytes to %02x:%02x:%02x:%02x:%02x:%02x", len, dst_mac[0],
           dst_mac[1], dst_mac[2], dst_mac[3], dst_mac[4], dst_mac[5]);
 }
@@ -417,6 +431,8 @@ static void on_access_point(RyuLdnSession *session, const uint8_t *payload, size
         }
     }
     if (!b->host) {
+        LOG_E("could not start the LDN host (see the errors above); the guest's "
+              "CreateNetwork will time out");
         return;
     }
 
