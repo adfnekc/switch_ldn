@@ -213,7 +213,9 @@ def build_auth_request(session_info, server_random, client_random, username):
     hdr.append(0)  # format: plaintext
     hdr.append(0)  # padding
     hdr.append(0)  # 8-byte header, matching ldn_parse_auth_frame's buf+8
-    hdr += session_info
+    # A real console's frame carries the session info byte-reversed: the bridge
+    # reverses it back in host_handle_frame() before comparing.
+    hdr += bytes(reversed(session_info))
     hdr += server_random
     hdr += client_random
     hdr += payload
@@ -246,13 +248,15 @@ class FakeConsole:
         except OSError:
             pass
         self.sock.bind(self.bind_path)
-        self.mac = bytes.fromhex("024a5753449901")
+        # Locally administered, unicast. Six bytes - anything else shifts
+        # the 802.11 header and the bridge reads the wrong addresses.
+        self.mac = bytes.fromhex("024A57534499")
 
     # -- framing helpers -------------------------------------------------
 
     def send_frame(self, body, subtype_action=True):
-        self.sock.sendto(build_80211(self.mac, self.ap_mac, subtype_action) + body,
-                         self.path)
+        frame = build_80211(self.mac, self.ap_mac, subtype_action) + body
+        self.sock.sendto(frame, self.path)
 
     def receive(self, timeout):
         self.sock.settimeout(timeout)
@@ -325,10 +329,10 @@ class FakeConsole:
               f"want={want.hex()[:12]} got={plain_tail[:32].hex()[:12]}")
         return session_info, nonce, plain_tail
 
-    def authenticate(self, session_info, nonce):
+    def authenticate(self, session_info, server_random):
         req = build_auth_request(
             session_info,
-            nonce + b"\x00" * 12,  # server_random, from the advertisement
+            server_random,
             bytes.fromhex("00112233445566778899aabbccddeeff"),
             b"FakeConsole",
         )
@@ -399,8 +403,12 @@ class FakeConsole:
             raise Fail("no LDN advertisement arrived on the radio socket")
         stage("advertisement received", True, f"{len(body)}-byte body")
 
-        session_info, nonce, _ = self.check_advertisement(body)
-        resp = self.authenticate(session_info, nonce)
+        session_info, nonce, plain_tail = self.check_advertisement(body)
+        # The decrypted tail starts at payload offset 0x28; the advertise data
+        # (and with it server_random, its first field) starts at 0x48.
+        cand = plain_tail[0x48 - 0x28: 0x48 - 0x28 + 16]
+        server_random = cand
+        resp = self.authenticate(session_info, server_random)
         self.check_auth_response(resp)
         self.send_pia()
 
