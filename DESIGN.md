@@ -61,18 +61,22 @@ reset. **One packet, no table, no reverse engineering.**
 This is also why `local_communication_version` matches for free: it is the same
 field the real console compares against.
 
-Two things still require a lookup:
+Nothing else requires a lookup. `--dump-adv`, `--passphrase-hex`, `--title-id`
+and `--only` used to exist for these two cases and are gone:
 
-1. `--dump-adv` (building a frame with no emulator attached), and
-2. a real console hosting the room - then the console chose its own passphrase
-   and never transmitted it.
+1. building a frame with no emulator attached — `make interop` covers that path
+   against a real client instead, and
+2. a real console hosting the room, where it chose its own passphrase and never
+   transmitted it — which is p1, out of scope by definition.
 
 ## Layout
 
 ```
+src/main.c          argument parsing, the event loop, and the glue between the two
+                    transports and the LDN core (both directions of game traffic)
 src/room.c          Room protocol transport (Eden/yuzu lineage)
 src/ryuldn.c        RyuLdn transport (Ryubing/Ryujinx)
-src/host.c          the LDN host: advertisements, station table, auth
+src/host.c          the LDN host: advertisements, station table, auth, watchdog
 src/ldn.c           LDN wire format + AES-CTR
 src/crypto.c        prod.keys + key derivation
 src/radio.c         hostapd + AF_PACKET I/O, action-frame injection
@@ -205,10 +209,10 @@ sequencing ever matters, linking `libenet` is a drop-in replacement for
 
 ## Build & smoke test
 
-```bash
-make            # needs libssl-dev
-make check      # builds a dummy prod.keys and one advertisement frame
-```
+See [README.md](README.md#build--test) and [README.md](README.md#run) — those
+are the canonical commands, and duplicating them here is how they drifted out of
+date before (this file used to still pass `--title-id`, an option that has since
+been removed). In short: `make`, `make test`, `make check`, `make interop`.
 
 ## Running it
 
@@ -222,9 +226,14 @@ scripts/setup-ap.sh selfcheck
 
 # 3. bridge
 sudo ./switch_ldn --ap-iface wlan0_ap --mon-iface wlan0_mon \
-    --channel 1 --title-id 01001B300B9BE000 \
-    --prodkeys prod.keys
+    --channel 1 --prodkeys prod.keys
 ```
+
+Note there is **no** `--title-id`, `--passphrase-hex`, `--dump-adv` or `--only`.
+They were removed on purpose: the title id, channel, passphrase and versions are
+taken from the emulator's own `CreateNetwork` / `IdSetGameInfo`, so a per-game
+option would only be a second source of truth that can disagree. `make check`
+asserts those flags stay gone.
 
 Then in Ryubing:
 `Multiplayer → Direct connect → 127.0.0.1 : 30456`
@@ -243,17 +252,35 @@ make test
 | `tests/test_wire.c` | RyuLdn struct sizes (12 / 0x40 / 0x480 / 0x500 / 0xBC), LDN payload sizes, channel encoding, session-info layout, AES-CTR round-trip, key derivation determinism, and `CreateAccessPointRequest` field offsets + passphrase extraction |
 | `tests/test_p1_refused.c` | socket-level: a guest sending `Connect` (p1) gets `NetworkError(ConnectionRejected)` rather than silence |
 | `tests/test_handshake.c` | socket-level: the RyuLdn handshake — `Initialize` must be answered with an `Initialize` carrying an assigned session id + MAC, and `Ping` with `{requester=0, id}`. Both were wrong before this existed. |
-| `tests/test_room_wire.c` | socket-level: Room wire format — a hand-built `IdJoinRequest` decodes to a 5-byte `IdJoinSuccess`, fake IPs are allocated from `192.168.x.y` without collision, `IdLdnPacket{Scan}` and `IdProxyPacket` decode field-for-field, the trailing LDN passphrase is surfaced (or correctly absent), and `IdRoomInformation` re-walks to the right member count. |
+| `tests/test_room_wire.c` | socket-level: Room wire format — a hand-built `IdJoinRequest` decodes to a 5-byte `IdJoinSuccess`, fake IPs are allocated from `192.168.x.y` without collision, `IdLdnPacket{Scan}` and `IdProxyPacket` decode field-for-field, the trailing LDN passphrase is surfaced (or correctly absent), `IdRoomInformation` re-walks to the *exact* end of the datagram (the truncation tripwire), `IdProxyPacket` is re-encoded with Eden's own `Domain`/`Protocol` values and a zstd payload that round-trips, a full room is refused with `IdRoomIsFull` while a re-sync from an existing member still succeeds, idle members are reclaimed so a full room is never permanent, and a bad protocol version is answered rather than swallowed. |
 | `tests/test_ctr_vectors.c` | The AES-CTR counter block, byte-for-byte, against vectors generated with PyCryptodome under `nonce || 0^12` (`tests/ctr_vectors.h`) |
 | `tests/test_auth_frame.c` | The LDN authentication frame layout: field order, little-/big-endian choices and the no-truncation guarantee on the response payload |
 | `tests/test_advert_nonce.c` | The 4-byte advertisement nonce: changes per emission, advances by exactly one, carries on wrap, survives a reconfigure |
-| `tests/test_host_watchdog.c` | Station bookkeeping on join (`last_seen_ms` / `joined_ms`), that the default 30 s timeout is preserved, and that a timed-out station is evicted and produces a `HOST_EVENT_STATION_LEFT` |
+| `tests/test_host_watchdog.c` | Station bookkeeping on join (`last_seen_ms` / `joined_ms`), that the default 30 s timeout is preserved, and that a timed-out station is evicted and produces a `HOST_EVENT_STATION_LEFT` carrying the station's identity (mac, IP, username). The identity snapshot matters: the slot is cleared before the event is pushed, so a transport that re-read the table would find nothing and silently drop every departure. |
 
 Every expected byte string is transcribed from Eden's own encoders.
 
 `make interop` is a separate, non-hardware end-to-end check: it runs the real
 transports (radio stubbed) against a source-based RyuLdn peer and an Eden
 `Room` peer. See [tests/interop/README.md](tests/interop/README.md).
+
+## Why no `ChallengeResponse` is needed
+
+Moved here from README, which only keeps a pointer. Checked against kinnay/LDN,
+which is the only place the format is written down. The station sends a
+`ChallengeRequest` inside its `AuthenticationRequest`, and the host answers with a
+`ChallengeResponse` inside the `AuthenticationResponse`. That is kinnay's *host*
+verifying a station, i.e. the anti-piracy half.
+
+Going the other way, the station's `_check_authentication_response()` only
+looks at the payload type, `local_communication_id`, `scene_id`, `ssid`,
+`server_random`, `client_random` and `status_code`. It never decodes the
+response's challenge, and `AuthenticationResponse.encode()` writes the challenge
+only when it is non-`None`, so a host with the challenge disabled emits exactly
+`platform + 0x83` zero bytes. That is what we send.
+
+The two 16-byte `unk` / `unk_host` fields therefore never reach the wire in the
+host-to-station direction, and there is nothing left to guess about them.
 
 ## The AES-CTR counter block (resolved)
 
@@ -301,11 +328,13 @@ Everything p0 needs to be proven on real hardware:
 |---|---|---|
 | 1 | **RESOLVED** — the AES-CTR counter-block layout (`nonce \|\| 0^12`) was derived from kinnay/LDN and pinned byte-for-byte against PyCryptodome. No capture needed. | `tests/test_ctr_vectors.c` |
 | 2 | **RESOLVED** — the data-frame counter block is the same `nonce \|\| 0^12` construction with the per-fragment nonce, covered by the same vectors. | `tests/test_ctr_vectors.c` |
-| 3 | 802.11 association → LDN station wiring: currently hostapd/kernel owns the station table and `host.c` learns the MAC from the LDN auth frame. Fine for the first milestone. | `host.c`, `handle_assoc` |
-| 6 | Channel changes requested by the guest are logged but not applied to a live radio (the guest decides the LDN channel; hostapd was started with `--channel`). Start the bridge on the channel the game uses. | `main.c`, `on_access_point` |
-| 7 | Passphrase `0` from the guest: rejected outright (a hard error) because the fixed security level 1 requires one. Not tested against a real console. | `host.c`, `host_configure` |
+| 3 | 802.11 association → LDN station wiring: hostapd and the kernel own the station table, and `host_handle_frame()` learns a station's MAC from its LDN authentication frame, so it only ever sees stations that already associated. Mapping an association event to an IP slot would need nl80211 or the hostapd station list; not needed while the LDN auth path carries the join. See the note in `host.c` above `host_handle_frame()`. | `src/host.c` |
 | 4 | RTL8812AU virtual-interface fragility. Validate with `setup-ap.sh selfcheck`; fallback documented in §3b. | `scripts/setup-ap.sh` |
 | 5 | Partial network/USER/paging logic. | `ryuldn.c` |
+| 6 | Channel changes requested by the guest are logged but not applied to a live radio (the guest decides the LDN channel; hostapd was started with `--channel`). Start the bridge on the channel the game uses. | `main.c`, `on_access_point` |
+| 7 | Passphrase `0` from the guest: rejected outright (a hard error) because the fixed security level 1 requires one. Not tested against a real console. | `src/host.c`, `host_configure` |
+| 8 | **RESOLVED for p0** — `IdProxyPacket` (Room) and `ProxyData` (RyuLdn) both carry game traffic, and neither direction drops silently any more. Worth re-checking against real payloads on hardware. | `src/main.c`, `deliver_from_guest` / `deliver_to_guest` |
+| 9 | `CreateAccessPoint` failing mid-way leaves the guest with no `NetworkError`, only a timeout. Only two error codes are confirmed (`None(0)`, `ConnectionRejected(202)`), so inventing a third could make the emulator misreport. | `src/main.c`, `on_access_point` |
 
 ### §3b Fallback: no hostapd
 
@@ -317,11 +346,21 @@ Python package which implements exactly this path.
 
 ## Status
 
-Skeleton complete and building. Validated: prod.keys parsing, key derivation,
-advertisement frame construction and AES-CTR.
+p0 is complete and building clean under `-Wall -Wextra`. 8 test suites pass,
+plus `make interop`, all without radio hardware.
+
+Validated without hardware: prod.keys parsing, key derivation, advertisement
+frame construction, AES-CTR against reference vectors, RyuLdn wire layout and
+handshake, Room wire format, fake IP allocation, member-slot enforcement and
+idle reclamation, both directions of game traffic (including the zstd step in
+`IdProxyPacket`), adopting the guest's `CreateNetwork` settings, the station
+watchdog, and refusing p1.
 
 Not yet validated (no hardware in the loop): actual radio I/O, action-frame
-injection on the RTL8812AU, and the end-to-end handshake.
+injection on the RTL8812AU, the end-to-end handshake, and real game payloads
+through the relay.
+
+See [README.md](README.md#what-is-left) for the ordered hardware checklist.
 
 ## Sources
 

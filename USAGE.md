@@ -127,14 +127,22 @@ sudo ./switch_ldn --ap-iface wlan0_ap --mon-iface wlan0_mon \
 
 ## 自检
 
+不插网卡也能跑。构建、测试、CLI 冒烟、以及两个真实客户端 peer 的联调命令见
+`README.md` 的 Build & test 一节；下面只说不依赖射频的部分。
+
 ```bash
-# 不插网卡也能跑
-./switch_ldn --selfcheck lo
-make test        # 4 套协议测试，全过说明 wire 格式没问题
+./switch_ldn --selfcheck lo    # 射频探测：报告 mode / ifindex
+make test                      # 8 套 socket 级测试，不碰射频
+make interop                   # 用真实 RyuLdn / Room peer 打桥（radio 被 stub）
 ```
 
-`make test` 不碰射频，覆盖 RyuLdn 握手、Room wire 格式、帧结构和 p1 拒绝路径。
-剩下的未知项只有 `TODO-1`（AES-CTR counter block 布局），那个必须真机抓包。
+`make test` 覆盖 RyuLdn 握手、Room wire 格式、帧结构、AES-CTR 参考向量、
+广告 nonce、station 看门狗和 p1 拒绝路径。
+
+**已经没有 software-only 的未知项了。** 曾经剩下的 AES-CTR counter block 布局
+（TODO-1）已经用 kinnay/LDN 的参考向量钉死，见 `tests/test_ctr_vectors.c`；
+`ChallengeResponse` 也不需要——真机根本不解析房主回的 challenge
+（见 `DESIGN.md` 的 "Why no ChallengeResponse is needed"）。
 
 ## 不需要的东西
 

@@ -91,11 +91,14 @@ the emulator's game creates its network.
 ## Build & test
 
 ```bash
-make            # needs libssl-dev
+make            # needs libssl-dev and libzstd-dev
 make test       # 8 suites, all socket-level, no hardware required
 make check      # CLI smoke test
 make interop    # real RyuLdn + Room peers against the bridge (no radio)
 ```
+
+These four commands are the whole verification surface; everything else in
+these docs describes behaviour, not more build steps.
 
 The interop target builds `tests/bridge_harness` (the bridge with the radio
 stubbed out) and drives it with two source-based peers: a RyuLdn peer that
@@ -119,7 +122,9 @@ sudo ./switch_ldn --ap-iface wlan0_ap --mon-iface wlan0_mon \
 
 ## What is left
 
-Everything that does not need hardware is done. In order:
+Everything that does not need hardware is done, including both directions of
+game traffic (see `room_send_proxy_packet()` for the Room uplink and
+`deliver_from_guest()` for the downlink). In order:
 
 1. **Probe the NIC** — `scripts/setup-ap.sh selfcheck`. Answers the three
    hardware risks in one shot: virtual-interface concurrency, regulatory domain,
@@ -129,30 +134,31 @@ Everything that does not need hardware is done. In order:
    thing to fix.
 3. **End-to-end handshake** — a console should reach "room found" and
    then either join or fail. The `ChallengeResponse` question is closed (see
-   below), so a failure here now points at the passphrase or the radio.
-4. **Pia traffic** — the last leg: whether real game traffic survives the
-   802.11-to-RyuLdn/Room translation.
+   [DESIGN.md](DESIGN.md#why-no-challengeresponse-is-needed)), so a failure here now
+   points at the passphrase or the radio.
+4. **Confirm the relay on real traffic** — both directions are implemented and
+   unit-tested, but only a real console can confirm the 802.11-to-RyuLdn/Room
+   translation survives real game payloads.
 
-Steps 1, 2 and 4 are "run it and look"; step 3 is the only one that can still
-surface an unknown, and it is no longer a wire-format unknown.
+Step 4 is "run it and look". Step 3 is the only one that can still surface an
+unknown, and it is no longer a wire-format unknown.
 
-### Why no `ChallengeResponse` is needed
+## Where things are documented
 
-Checked against kinnay/LDN, which is the only place the format is written down.
-The station sends a `ChallengeRequest` inside its `AuthenticationRequest`, and
-the host answers with a `ChallengeResponse` inside the
-`AuthenticationResponse`. That is kinnay's *host* verifying a station, i.e. the
-anti-piracy half.
+| Topic | File |
+|---|---|
+| What this is, compatibility, build, run | `README.md` (this file) |
+| Operating scenarios, hardware, failure modes (Chinese) | [USAGE.md](USAGE.md) |
+| Architecture, protocol internals, test inventory, open questions | [DESIGN.md](DESIGN.md) |
+| Why consoles see a room but only some can join | [docs/ROOM_VISIBILITY.md](docs/ROOM_VISIBILITY.md) |
+| The Eden passphrase patch, and how to verify it | [docs/EDEN_PATCH.md](docs/EDEN_PATCH.md) |
+| Which emulator sources the interop tests use, and why | [docs/EMULATOR_SOURCES.md](docs/EMULATOR_SOURCES.md) |
+| The source-based interop peers | [tests/interop/README.md](tests/interop/README.md) |
+| Conventions for anyone (human or agent) working here | [AGENTS.md](AGENTS.md) |
 
-Going the other way, the station's `_check_authentication_response()` only
-looks at five things — the payload type, `local_communication_id`, `scene_id`,
-`ssid`, `server_random`, `client_random` and `status_code`. It never decodes
-the response's challenge, and `AuthenticationResponse.encode()` writes the
-challenge only when it is non-`None`, so a host with the challenge disabled
-emits exactly `platform + 0x83` zero bytes. That is what we send.
+If a topic is described in more than one of these files, the one in the table
+is the authority and the others should point at it.
 
-The two 16-byte `unk` / `unk_host` fields therefore never reach the wire in the
-host-to-station direction, and there is nothing left to guess about them.
 
 ## Status
 
