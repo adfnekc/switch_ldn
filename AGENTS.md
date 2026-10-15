@@ -51,13 +51,16 @@ per-game lookup would only be a second source of truth that can disagree.
 
 ## Testing
 
-- `make test` is 8 suites, all socket-level, no radio hardware. `make interop`
-  drives the real transports against source-based peers (`tests/interop/`).
+- `make test` is 9 suites, all socket-level, no radio hardware. `make interop`
+  drives the bridge (radio stubbed) against source-based emulator peers, and
+  `make console-sim` drives the **real** binary with `--radio-socket` against a
+  fake console — see `tests/interop/`. All three run in CI.
 - Add a test for every fix. Several bugs survived a long time because the test
   asserted something adjacent (counting packets instead of decoding the field,
   passing the same MAC twice so both a bug and its fix would pass).
 - Interop cannot cover the console→emulator direction: `radio` is stubbed in
-  `tests/bridge_harness.c`, so `radio_rx()` never fires. Cover that in C tests.
+  `tests/bridge_harness.c`, so `radio_rx()` never fires. `make console-sim`
+  covers it by driving the real binary over a Unix datagram socket instead.
 - Keep the tree warning-free under `-Wall -Wextra`.
 
 ## Build deps

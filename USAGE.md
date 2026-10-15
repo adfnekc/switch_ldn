@@ -132,12 +132,19 @@ sudo ./switch_ldn --ap-iface wlan0_ap --mon-iface wlan0_mon \
 
 ```bash
 ./switch_ldn --selfcheck lo    # 射频探测：报告 mode / ifindex
-make test                      # 8 套 socket 级测试，不碰射频
+make test                      # 9 套 socket 级测试，不碰射频
 make interop                   # 用真实 RyuLdn / Room peer 打桥（radio 被 stub）
+make console-sim               # 假真机打真二进制：完整 console → 模拟器 链路
 ```
 
 `make test` 覆盖 RyuLdn 握手、Room wire 格式、帧结构、AES-CTR 参考向量、
-广告 nonce、station 看门狗和 p1 拒绝路径。
+广告哈希、广告 nonce、station 看门狗和 p1 拒绝路径。
+
+`make console-sim` 是唯一能覆盖**真机 → 桥** 方向的：`make interop` 里 radio
+被 stub 掉，`radio_rx()` 永远不会触发。它用 `--radio-socket` 把一个 Unix
+datagram socket 冒充成射频，驱动**真实二进制**——不需要 root，也不需要网卡。
+链条是：peer 建网络 → 假真机收到广告、自己推导密钥、解密、校验哈希 →
+认证通过 → Pia 流量上行 → peer 侧收到对应的 ProxyData。
 
 **已经没有 software-only 的未知项了。** 曾经剩下的 AES-CTR counter block 布局
 （TODO-1）已经用 kinnay/LDN 的参考向量钉死，见 `tests/test_ctr_vectors.c`；

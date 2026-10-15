@@ -1,19 +1,24 @@
 # Interop tests
 
-These tests drive the bridge's **real transports** with peers built from the
-emulators' own protocol code. No hardware and no prebuilt binaries are
-involved: everything here is source that `make interop` compiles and runs.
+Two targets, and they cover different halves of the system. Neither subsumes
+the other, which is why both exist.
 
-```
-make interop
-```
+| Target | Direction it covers | How |
+|---|---|---|
+| `make interop` | emulator → bridge | harness with the radio stubbed, source-based emulator peers |
+| `make console-sim` | **console → bridge** | the **real** binary over a Unix datagram socket standing in for the radio |
 
-builds three things and wires them together:
+No hardware and no prebuilt binaries are involved: everything here is source
+that the targets compile and run. Both run in CI.
+
+## The emulator side — `make interop`
+
+Builds three things and wires them together:
 
 | Piece | Path | What it is |
 |---|---|---|
 | `build/bridge_harness` | `tests/bridge_harness.c` | The bridge with the radio stubbed out. It `#include`s `src/main.c` (renaming `main`) so it runs the *same* transports and LDN core as the real binary, minus `radio_open()` and the argument parser. Listens on RyuLdn TCP `30456` and Room UDP `24872`. |
-| `tests/interop/ryu_peer.py` | Python | Replays a real Ryubing/Ryujinx client's handshake: `Passphrase` → `Initialize` → `Ping` → `CreateAccessPoint`, then reads the `ProxyConfig` and `NetworkInfo` the bridge answers with. |
+| `tests/interop/ryu_peer.py` | Python | Replays a real Ryubing/Ryujinx client's handshake: `Passphrase` → `Initialize` → `Ping` → `CreateAccessPoint`, then reads the `ProxyConfig` and `NetworkInfo` the bridge answers with. With `--expect-proxy` it also waits for and decodes the `ProxyData` a console sends. |
 | `build/room_peer` | `tests/interop/room/room_peer.cpp` | Eden/yuzu `Room` member. It is compiled against Eden's own `packet.cpp`/`packet.h` (copied from upstream, the only edit being the `#include` path), so the bytes on the wire are the bytes Eden would send. |
 
 The interop target requires the RyuLdn peer to see `createAccessPoint` and the
@@ -74,11 +79,55 @@ tell the relay path is actually being exercised.
 LDN console crypto (that only guards the 802.11 leg against a real Switch), so
 any 16-byte values work; the harness only needs the file to parse.
 
+The Room transport's uplink (`room_send_proxy_packet`) and its zstd round-trip
+have no peer here; they are covered by `tests/test_room_wire.c` instead.
+
+## The console side — `make console-sim`
+
+```
+make console-sim
+```
+
+`tests/bridge_harness.c` stubs the radio out, so `radio_rx()` never fires and
+nothing in `make interop` touches the console → bridge direction. This target
+closes that gap by driving the **real binary** with
+
+```
+--radio-socket <path>
+```
+
+a bound Unix datagram socket (mode 0600) that stands in for both raw sockets.
+It needs neither root nor a wireless NIC, so it runs in CI.
+
+| Piece | Path | What it does |
+|---|---|---|
+| `tests/interop/ryu_peer.py --hold` | Python | Creates the network, then waits for the console's traffic. |
+| `tests/interop/fake_console.py` | Python | Plays a real console against that socket. |
+
+The fake console is the first client here that shares **no code** with the
+bridge: frame layouts are transcribed from `src/ldn.c`, and
+`prodkeys_derive_key()` / `ldn_adv_key()` are re-implemented against
+`openssl`. That independence is the point — it caught an advertisement whose
+SHA-256 did not cover the advertise data, which every existing test missed.
+
+Expected stages:
+
+```
+advertisement received / carries a plaintext session_info / title id matches
+advertisement decrypts with a key we derived ourselves
+decrypted payload hashes to the advertised SHA-256
+AuthenticationRequest sent
+AuthenticationResponse status is SUCCESS / marked as a response / echoes our session_info
+Pia frame sent upstream as a data frame
+ProxyData received from a real console / payload is intact
+```
+
 ## What interop cannot cover
 
-`radio` is stubbed out in `tests/bridge_harness.c`, so no 802.11 frames exist
-and `radio_rx()` never fires. That means the **console to emulator** direction is
-not observable here: the bridge's uplink for the Room transport
-(`room_send_proxy_packet`) and its zstd round-trip are covered by
-`tests/test_room_wire.c` instead, and the downlink is what the `proxy_packet`
-stage above exercises.
+`radio` is stubbed in `tests/bridge_harness.c`, so no 802.11 frames exist and
+`radio_rx()` never fires — that direction is what `make console-sim` is for.
+`console-sim` in turn uses `ryu_peer.py`, a handshake peer rather than a full
+client: it reads `ProxyData` and checks the ports and payload, but a real
+Ryubing instance may treat the `NetworkInfo` in `SyncNetwork` differently. See
+[DESIGN.md](../../DESIGN.md#open-questions) for the closed list of things both
+targets still cannot show.

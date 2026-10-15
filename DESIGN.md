@@ -335,6 +335,9 @@ Everything p0 needs to be proven on real hardware:
 | 7 | Passphrase `0` from the guest: rejected outright (a hard error) because the fixed security level 1 requires one. Not tested against a real console. | `src/host.c`, `host_configure` |
 | 8 | **RESOLVED for p0** — `IdProxyPacket` (Room) and `ProxyData` (RyuLdn) both carry game traffic, and neither direction drops silently any more. Worth re-checking against real payloads on hardware. | `src/main.c`, `deliver_from_guest` / `deliver_to_guest` |
 | 9 | `CreateAccessPoint` failing mid-way leaves the guest with no `NetworkError`, only a timeout. Only two error codes are confirmed (`None(0)`, `ConnectionRejected(202)`), so inventing a third could make the emulator misreport. | `src/main.c`, `on_access_point` |
+| 10 | `RyuLdnProxyInfo`'s two address fields are in **different byte orders** on the wire: `source_ipv4` comes from `parse_udp()`'s `rd_be32()` (host order) while `dest_ipv4` is `guest_proxy_ip`, kept in `htonl()`/network order. Both are opaque `u32`s to Ryubing, which reads them as raw bytes, so the debug peer cannot tell the difference — which is exactly why this is still open rather than fixed. Confirm against the real client before changing it; the interleaving trap two rows above (`{srcIp, srcPort, dstIp, dstPort, proto}`) means a size assertion will not catch a mistake here. | `src/main.c`, `deliver_to_guest` / `parse_udp` |
+| 11 | The advertisement/authentication path is exercised against an independently-derived key (`tests/test_advert_hash.c`, `make console-sim`), but the `server_random` the bridge compares against a request is **stable across emissions** while the wire nonce advances every 100 ms. A real console that heard an older advertisement and answers late is rejected as `server_random` mismatch — correct for a stale frame, but it means a console which associates slowly can never join. Confirm what a real console does when it races the 100 ms cadence. | `src/host.c`, `host_handle_frame` |
+| 12 | `make console-sim` proves the full chain against the bridge's **real** transports with a radio standing in, but the emulator side is `ryu_peer.py` — a handshake peer, not a full client. It reads `ProxyData` and checks ports/payload, but a real Ryubing instance may expect the `NetworkInfo` in `SyncNetwork` to reflect the console differently than our synthesised node does. | `tests/interop/ryu_peer.py` |
 
 ### §3b Fallback: no hostapd
 
@@ -346,20 +349,22 @@ Python package which implements exactly this path.
 
 ## Status
 
-p0 is complete and building clean under `-Wall -Wextra`. 8 test suites pass,
-plus `make interop`, all without radio hardware.
+p0 is complete and builds clean under `-Wall -Wextra`. 9 test suites
+pass, plus `make interop` and `make console-sim`, all without radio hardware,
+root, or a wireless NIC.
 
 Validated without hardware: prod.keys parsing, key derivation, advertisement
-frame construction, AES-CTR against reference vectors, RyuLdn wire layout and
-handshake, Room wire format, fake IP allocation, member-slot enforcement and
-idle reclamation, both directions of game traffic (including the zstd step in
-`IdProxyPacket`), adopting the guest's `CreateNetwork` settings, the station
-watchdog, and refusing p1.
+frame construction and its SHA-256, AES-CTR against reference vectors, RyuLdn
+wire layout and handshake, Room wire format, fake IP allocation, member-slot
+enforcement and idle reclamation, both directions of game traffic (including
+the zstd step in `IdProxyPacket`), the whole console → bridge chain against an
+independently-derived key, adopting the guest's `CreateNetwork` settings, the
+station watchdog, and refusing p1.
 
 Not yet validated (no hardware in the loop): actual radio I/O, action-frame
-injection on the RTL8812AU, the end-to-end handshake, and real game payloads
-through the relay.
-
+injection on the RTL8812AU, and the end-to-end handshake against a real
+console. `make console-sim` covers the same chain with a socket standing in for
+the radio, so a failure after this point is the radio, not the protocol.
 See [README.md](README.md#what-is-left) for the ordered hardware checklist.
 
 ## Sources

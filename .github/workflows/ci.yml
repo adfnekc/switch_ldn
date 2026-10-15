@@ -28,3 +28,9 @@ jobs:
 
       - name: Interop (real RyuLdn + Room peers against the bridge)
         run: make interop
+
+      # The one that exercises the console -> bridge direction. Drives the real
+      # binary over a Unix datagram socket standing in for the radio, so it
+      # needs neither root nor a wireless NIC.
+      - name: Fake console against the real binary
+        run: make console-sim

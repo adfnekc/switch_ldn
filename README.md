@@ -91,20 +91,34 @@ the emulator's game creates its network.
 ## Build & test
 
 ```bash
-make            # needs libssl-dev and libzstd-dev
-make test       # 8 suites, all socket-level, no hardware required
-make check      # CLI smoke test
-make interop    # real RyuLdn + Room peers against the bridge (no radio)
+make               # needs libssl-dev and libzstd-dev
+make test          # 9 suites, all socket-level, no hardware required
+make check         # CLI smoke test
+make interop       # real RyuLdn + Room peers against the bridge (no radio)
+make console-sim   # a fake console against the real binary (no radio, no root)
 ```
 
-These four commands are the whole verification surface; everything else in
+These five commands are the whole verification surface; everything else in
 these docs describes behaviour, not more build steps.
+
+`interop` and `console-sim` are different things and neither subsumes the
+other:
+
+- `make interop` stubs the radio out and drives the bridge with source-based
+  emulator peers. It **cannot** touch the console → bridge direction, because
+  `radio_rx()` never fires.
+- `make console-sim` drives the **real** binary with `--radio-socket`, a Unix
+  datagram socket standing in for the radio, and runs a fake console through
+  the whole chain: advertisement, independent key derivation, authentication,
+  and Pia traffic all the way to a `ProxyData` on the emulator side. It needs
+  neither root nor a wireless NIC.
 
 The interop target builds `tests/bridge_harness` (the bridge with the radio
 stubbed out) and drives it with two source-based peers: a RyuLdn peer that
 replays a real Ryubing/Ryujinx handshake, and an Eden `Room` peer built from
 Eden's own `packet.cpp`. Both peers are plain source, no prebuilt binaries. See
-[tests/interop/README.md](tests/interop/README.md).
+[tests/interop/README.md](tests/interop/README.md) for the fake console, and
+[DESIGN.md](DESIGN.md#open-questions) for what none of this covers.
 
 ## Run
 
