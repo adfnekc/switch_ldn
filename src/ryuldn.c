@@ -132,20 +132,83 @@ void ryuldn_network_info_init(RyuLdnNetworkInfo *info)
 /* Frame write                                                        */
 /* ------------------------------------------------------------------ */
 
+/*
+ * A guest that stops reading (a paused Ryubing, a suspended Eden) must not be
+ * able to wedge the bridge: the main loop is single threaded, so a spinning
+ * send() here would stop radio_poll(), room_server_poll() and host_tick(), and
+ * the console would watch the network disappear.
+ *
+ * So instead of spinning we wait for writability with poll() in bounded
+ * slices, warn once the guest has been stuck for a moment, and give up on the
+ * session entirely if it makes no progress for SESSION_WRITE_STALL_MS. The
+ * session is then marked dead, which the reap path in
+ * ryuldn_server_poll() turns into close() + free().
+ */
+#define SESSION_WRITE_POLL_MS 50   /* poll() slice while the guest is not reading */
+#define SESSION_WRITE_GRACE_MS 250 /* complain once a write has been stuck this long */
+#define SESSION_WRITE_WARN_MS 1000 /* ...and then at most this often */
+#define SESSION_WRITE_STALL_MS 5000 /* no progress at all: drop the session */
+
 static int session_write_all(RyuSessionImpl *s, const uint8_t *buf, size_t len)
 {
     size_t off = 0;
+    uint64_t stuck_since = 0; /* ms timestamp, 0 = not currently blocked */
+    uint64_t last_warn = 0;
+
     while (off < len) {
         ssize_t n = send(s->fd, buf + off, len - off, MSG_NOSIGNAL);
-        if (n < 0) {
-            if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) {
-                continue;
-            }
+        if (n >= 0) {
+            off += (size_t)n;
+            stuck_since = 0; /* progress: the stall is over */
+            continue;
+        }
+        if (errno == EINTR) {
+            continue; /* interrupted by a signal: just retry */
+        }
+        if (errno != EAGAIN && errno != EWOULDBLOCK) {
             LOG_E("session %d: send failed: %s", s->fd, strerror(errno));
             s->alive = false;
             return -1;
         }
-        off += (size_t)n;
+
+        /*
+         * The socket buffer is full because the guest is not reading. Never
+         * spin: wait for it to drain, and keep an eye on the clock so a peer
+         * that never reads cannot hang the rest of the bridge.
+         */
+        uint64_t now = now_ms();
+        if (!stuck_since) {
+            stuck_since = now;
+            last_warn = now;
+            LOG_W("session %d: guest is not reading, write blocked (%zu bytes left)",
+                  s->fd, len - off);
+        } else {
+            if (now - last_warn >= SESSION_WRITE_WARN_MS) {
+                LOG_W("session %d: still blocked after %llu ms", s->fd,
+                      (unsigned long long)(now - stuck_since));
+                last_warn = now;
+            }
+            if (now - stuck_since >= SESSION_WRITE_STALL_MS) {
+                LOG_E("session %d: no send progress for %llu ms, dropping it", s->fd,
+                      (unsigned long long)(now - stuck_since));
+                s->alive = false;
+                return -1;
+            }
+        }
+
+        struct pollfd pfd;
+        memset(&pfd, 0, sizeof(pfd));
+        pfd.fd = s->fd;
+        pfd.events = POLLOUT;
+        int rc = poll(&pfd, 1, SESSION_WRITE_POLL_MS);
+        if (rc < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            LOG_E("session %d: poll failed: %s", s->fd, strerror(errno));
+            s->alive = false;
+            return -1;
+        }
     }
     return 0;
 }

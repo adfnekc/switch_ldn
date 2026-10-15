@@ -65,6 +65,25 @@ typedef struct {
 /* Radio -> RyuLdn (game traffic)                                      */
 /* ------------------------------------------------------------------ */
 
+/*
+ * Both paths that push something to the emulator historically dropped the
+ * packet silently when b->guest was NULL, which made "the emulator died"
+ * indistinguishable from "the network is quiet". Say so, but not more than
+ * once every few seconds: a guest that stays away for minutes must not turn
+ * into a log flood.
+ */
+static uint64_t g_guest_gone_warned_at;
+
+static void warn_guest_gone(const char *what)
+{
+    uint64_t now = now_ms();
+    if (g_guest_gone_warned_at && now - g_guest_gone_warned_at < 5000) {
+        return;
+    }
+    g_guest_gone_warned_at = now;
+    LOG_W("%s: no emulator guest is connected, dropping", what);
+}
+
 static bool parse_udp(const uint8_t *eth, size_t len, const uint8_t **udp,
                       size_t *udp_len, uint16_t *sport, uint16_t *dport,
                       uint32_t *src_ip, uint32_t *dst_ip)
@@ -99,6 +118,7 @@ static bool parse_udp(const uint8_t *eth, size_t len, const uint8_t **udp,
 static void deliver_to_guest(Bridge *b, const uint8_t *eth, size_t len)
 {
     if (!b->guest) {
+        warn_guest_gone("radio->guest");
         return;
     }
 
@@ -459,6 +479,37 @@ static void on_proxy_disconnect(RyuLdnSession *session, RyuLdnProxyInfo info, vo
     (void)user;
 }
 
+/*
+ * The emulator's TCP connection dropped (or it sent Disconnect). RyuLdn only
+ * tells us *which* session left; the session itself is owned by ryuldn.c's
+ * session table and is about to be closed and freed by the reap path. All we
+ * may do is drop our reference to it, otherwise the next SyncNetwork or
+ * ProxyData would write into freed heap.
+ *
+ * This handler never frees anything and never dereferences the session beyond
+ * the name lookup below, which ryuldn.c performs *before* reaping.
+ */
+static void on_guest_disconnected(RyuLdnSession *session, void *user)
+{
+    Bridge *b = user;
+    if (!b) {
+        return;
+    }
+
+    const RyuLdnGuestGameSettings *gs = ryuldn_session_guest_settings(session);
+    const char *who = (gs && gs->user.user_name[0]) ? gs->user.user_name : "unnamed";
+
+    if (b->guest == session) {
+        b->guest = NULL;
+        LOG_I("guest '%s' left: it is offline, nothing will be bridged until it "
+              "comes back",
+              who);
+        return;
+    }
+
+    LOG_I("session for '%s' left (it was not the current guest)", who);
+}
+
 static const RyuLdnHandlers k_handlers = {
     .on_initialized = on_initialized,
     .on_connected = on_connected,
@@ -467,6 +518,7 @@ static const RyuLdnHandlers k_handlers = {
     .on_proxy_data = on_proxy_data,
     .on_proxy_connect = on_proxy_connect,
     .on_proxy_disconnect = on_proxy_disconnect,
+    .on_disconnected = on_guest_disconnected,
 };
 
 /* ------------------------------------------------------------------ */
@@ -498,13 +550,22 @@ static void notify_station_changed(Bridge *b, const HostEvent *ev)
     if (!b->host) {
         return;
     }
-    const HostStation *st = host_station(b->host, ev->index);
-    if (!st || !st->in_use) {
-        return;
-    }
+
+    /*
+     * Build the node from the event's snapshot, not from host_station(): the
+     * host has already cleared the slot when it drained a leave, which is why
+     * gating on st->in_use here used to swallow every departure.
+     */
+    HostStation st;
+    memset(&st, 0, sizeof(st));
+    st.in_use = true;
+    memcpy(st.mac, ev->mac, sizeof(st.mac));
+    st.ipv4 = ev->ipv4;
+    st.app_communication_version = ev->app_communication_version;
+    memcpy(st.username, ev->username, sizeof(st.username));
 
     RyuLdnNodeInfo node;
-    fill_node_info(&node, st, st->mac, st->username);
+    fill_node_info(&node, &st, st.mac, st.username);
 
     bool joined = ev->kind == HOST_EVENT_STATION_JOINED;
 
@@ -514,6 +575,8 @@ static void notify_station_changed(Bridge *b, const HostEvent *ev)
         build_network_info(b, &info);
         ryuldn_send_sync_network(b->guest, &info);
         LOG_D("SyncNetwork -> RyuLdn guest (%d stations)", info.node_count);
+    } else {
+        warn_guest_gone("SyncNetwork");
     }
 
     /* --- Room member: Connect/Disconnect carrying a NodeInfo --- */
@@ -524,7 +587,7 @@ static void notify_station_changed(Bridge *b, const HostEvent *ev)
          * local_ip is the joining node's own address from the room member's
          * point of view; yuzu pushes it straight onto connected_clients.
          */
-        uint32_t st_host = ntohl(st->ipv4);
+        uint32_t st_host = ntohl(st.ipv4);
         uint8_t st_ip[4] = {(uint8_t)(st_host >> 24), (uint8_t)(st_host >> 16),
                             (uint8_t)(st_host >> 8), (uint8_t)st_host};
         room_send_ldn_packet(b->room_server, b->room_member, type, st_ip, st_ip, false,

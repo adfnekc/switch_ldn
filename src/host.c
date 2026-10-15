@@ -19,7 +19,12 @@ typedef struct Host {
     int event_head, event_count;
 } Host;
 
-static void host_push_event(Host *host, HostEventKind kind, int index)
+/*
+ * `st` is copied into the event before the caller clears the slot, so the
+ * transports can still see *who* left when they drain the ring.
+ */
+static void host_push_event(Host *host, HostEventKind kind, int index,
+                           const HostStation *st)
 {
     if (host->event_count == (int)(sizeof(host->events) / sizeof(host->events[0]))) {
         LOG_W("host: event ring full, dropping a %s for slot %d",
@@ -28,8 +33,16 @@ static void host_push_event(Host *host, HostEventKind kind, int index)
     }
     int at = (host->event_head + host->event_count) %
              (int)(sizeof(host->events) / sizeof(host->events[0]));
-    host->events[at].kind = kind;
-    host->events[at].index = index;
+    HostEvent *ev = &host->events[at];
+    memset(ev, 0, sizeof(*ev));
+    ev->kind = kind;
+    ev->index = index;
+    if (st) {
+        memcpy(ev->mac, st->mac, sizeof(ev->mac));
+        ev->ipv4 = st->ipv4;
+        ev->app_communication_version = st->app_communication_version;
+        memcpy(ev->username, st->username, sizeof(ev->username));
+    }
     host->event_count++;
 }
 
@@ -415,7 +428,7 @@ void host_tick(Host *host, Radio *radio)
                   "%llums, broadcasting leave",
                   st->mac[0], st->mac[1], st->mac[2], st->mac[3], st->mac[4],
                   st->mac[5], (unsigned long long)(now - st->last_seen_ms));
-            host_push_event(host, HOST_EVENT_STATION_LEFT, i);
+            host_push_event(host, HOST_EVENT_STATION_LEFT, i, st);
             memset(st, 0, sizeof(*st));
             if (host->pub.station_count > 0) {
                 host->pub.station_count--;
@@ -625,7 +638,7 @@ bool host_handle_frame(Host *host, Radio *radio, const RadioFrame *frame)
             st->last_seen_ms = now_ms();
             st->joined_ms = st->last_seen_ms;
             host->pub.station_count++;
-            host_push_event(host, HOST_EVENT_STATION_JOINED, idx);
+            host_push_event(host, HOST_EVENT_STATION_JOINED, idx, st);
             LOG_I("station joined: %02x:%02x:%02x:%02x:%02x:%02x slot=%d ip=%u.%u.%u.%u",
                   st->mac[0], st->mac[1], st->mac[2], st->mac[3], st->mac[4], st->mac[5],
                   idx, (st->ipv4 >> 24) & 0xFF, (st->ipv4 >> 16) & 0xFF,
@@ -671,9 +684,10 @@ bool host_handle_frame(Host *host, Radio *radio, const RadioFrame *frame)
               frame->src_mac[4], frame->src_mac[5]);
         int idx = host_station_index_by_mac(host, frame->src_mac);
         if (idx >= 0) {
+            host_push_event(host, HOST_EVENT_STATION_LEFT, idx,
+                            &host->pub.stations[idx]);
             memset(&host->pub.stations[idx], 0, sizeof(HostStation));
             host->pub.station_count--;
-            host_push_event(host, HOST_EVENT_STATION_LEFT, idx);
         }
         return true;
     }

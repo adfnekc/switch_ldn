@@ -172,8 +172,7 @@ void room_server_destroy(RoomServer *server);
 void room_server_poll(RoomServer *server, int timeout_ms);
 
 /* Accessors used by the bridge. */
-const RoomMemberInfo *room_server_members(const RoomServer *server, size_t *count);
-int room_server_find_by_fake_ip(const RoomServer *server, const uint8_t fake_ip[4]);
+size_t room_server_members(const RoomServer *server, RoomMemberInfo *out, size_t cap);int room_server_find_by_fake_ip(const RoomServer *server, const uint8_t fake_ip[4]);
 
 /* Outgoing. */
 void room_send_join_success(RoomServer *server, int member_id);

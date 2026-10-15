@@ -133,6 +133,19 @@ typedef enum {
 typedef struct {
     HostEventKind kind;
     int index; /* station slot */
+    /*
+     * Snapshot of the station, taken before the slot is cleared.
+     *
+     * A leave event has to be actionable *after* the slot is gone: the studio
+     * producers memset the station before pushing, so anything that tries to
+     * read the table when draining the ring finds an empty slot and does
+     * nothing - which is how leaves used to be swallowed. Carry the identity so
+     * the event is self-contained.
+     */
+    uint8_t mac[6];
+    uint32_t ipv4; /* network byte order, as in HostStation */
+    uint16_t app_communication_version;
+    char username[32]; /* sizeof(((HostStation *)0)->username) */
 } HostEvent;
 
 /* Returns 1 and fills `ev` when an event is pending, 0 when drained. */

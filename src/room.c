@@ -318,10 +318,27 @@ int room_server_find_by_fake_ip(const RoomServer *server, const uint8_t fake_ip[
     return -1;
 }
 
-const RoomMemberInfo *room_server_members(const RoomServer *server, size_t *count)
+/*
+ * Copy the joined members into the caller's buffer.
+ *
+ * Returns how many were written. The previous shape of this API returned a
+ * pointer into the server while reporting count=ROOM_MAX_MEMBERS, which only
+ * ever held one member - any caller that believed the count would walk straight
+ * past the end of the data it was handed. A buffer the caller owns cannot lie
+ * about its own size.
+ */
+size_t room_server_members(const RoomServer *server, RoomMemberInfo *out, size_t cap)
 {
-    *count = ROOM_MAX_MEMBERS;
-    return server->members[0].info.in_use ? &server->members[0].info : NULL;
+    size_t n = 0;
+    if (!server || !out) {
+        return 0;
+    }
+    for (int i = 0; i < ROOM_MAX_MEMBERS && n < cap; i++) {
+        if (server->members[i].info.in_use) {
+            out[n++] = server->members[i].info;
+        }
+    }
+    return n;
 }
 
 /* ------------------------------------------------------------------ */
@@ -463,6 +480,17 @@ void room_send_ldn_packet(RoomServer *server, int member_id, LDNPacketType type,
     pk_u8(&p, broadcast ? 1 : 0);
     pk_u32(&p, data_len);
     pk_raw(&p, data, data_len);
+
+    /*
+     * Same guard as room_broadcast_information: pk_* stops growing the buffer
+     * and sets ok=false, and sending anyway would put a datagram on the wire
+     * whose length prefix no longer matches its body.
+     */
+    if (!p.ok) {
+        LOG_E("room: IdLdnPacket of %u bytes does not fit in %zu bytes", data_len,
+              PACKET_BUFSIZE);
+        return;
+    }
 
     send_to(server, m, p.buf, p.len);
 }

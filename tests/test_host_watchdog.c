@@ -32,13 +32,16 @@ static void expect(const char *what, int ok)
 }
 
 /* Drain the event ring and report whether `want` was seen. */
-static int poll_kind(Host *host, HostEventKind want, int *index)
+static int poll_kind(Host *host, HostEventKind want, int *index, HostEvent *out)
 {
     HostEvent ev;
     while (host_poll_event(host, &ev)) {
         if (ev.kind == want) {
             if (index) {
                 *index = ev.index;
+            }
+            if (out) {
+                *out = ev;
             }
             return 1;
         }
@@ -131,7 +134,7 @@ int main(void)
     expect("auth request is consumed", host_handle_frame(host, NULL, &rf));
 
     int idx = -1;
-    expect("join event pushed", poll_kind(host, HOST_EVENT_STATION_JOINED, &idx));
+    expect("join event pushed", poll_kind(host, HOST_EVENT_STATION_JOINED, &idx, NULL));
     expect("join used slot 1", idx == 1);
     expect("station count is one", host_station_count(host) == 1);
 
@@ -152,7 +155,7 @@ int main(void)
     host_tick(host, NULL);
     expect("timeout 0 keeps the default (station survives)",
            host_station_count(host) == 1 &&
-           !poll_kind(host, HOST_EVENT_STATION_LEFT, NULL));
+           !poll_kind(host, HOST_EVENT_STATION_LEFT, NULL, NULL));
 
     /* Now shrink the timeout and confirm the watchdog evicts the station. */
     host_set_station_timeout_ms(host, 1);
@@ -163,9 +166,20 @@ int main(void)
     host_tick(host, NULL);
 
     int left_idx = -1;
+    HostEvent left = {0};
     expect("leave event pushed on timeout",
-           poll_kind(host, HOST_EVENT_STATION_LEFT, &left_idx));
+           poll_kind(host, HOST_EVENT_STATION_LEFT, &left_idx, &left));
     expect("leave event names slot 1", left_idx == 1);
+    /*
+     * The slot is already cleared at this point, so the event must carry the
+     * station's identity itself. Without that snapshot the transports branched
+     * on st->in_use and dropped every departure.
+     */
+    expect("leave event carries the MAC",
+           memcmp(left.mac, "\x02\x4a\x57\x53\x44\x01", 6) == 0);
+    expect("leave event carries the username",
+           strcmp(left.username, "Tester") == 0);
+    expect("leave event carries an IP", left.ipv4 != 0);
     expect("station count back to zero", host_station_count(host) == 0);
     st = host_station(host, 1);
     expect("evicted slot is cleared", st && !st->in_use);

@@ -182,9 +182,8 @@ int main(void)
         RoomServer *probe = room_server_create("127.0.0.1", 47914, NULL, NULL, "p", "", "",
                                                8);
         assert(probe != NULL);
-        size_t n = 0;
-        const RoomMemberInfo *members = room_server_members(probe, &n);
-        assert(members == NULL); /* empty room */
+        RoomMemberInfo list[ROOM_MAX_MEMBERS];
+        assert(room_server_members(probe, list, ROOM_MAX_MEMBERS) == 0);
         room_server_destroy(probe);
         printf("empty room reports no members\n");
     }
@@ -663,6 +662,18 @@ int main(void)
             room_server_poll(small, 0);
             assert(recv(s, r, sizeof(r), 0) == 5 && r[0] == IdJoinSuccess);
             close(s);
+        }
+
+        /* The member list must report the real members, not a padded count. */
+        {
+            RoomMemberInfo list[ROOM_MAX_MEMBERS];
+            size_t got = room_server_members(small, list, ROOM_MAX_MEMBERS);
+            assert(got == SLOTS);
+            assert(!strcmp(list[0].nickname, "player0"));
+            assert(!strcmp(list[SLOTS - 1].nickname, "player1"));
+            RoomMemberInfo tiny[1];
+            assert(room_server_members(small, tiny, 1) == 1); /* respects cap */
+            printf("member list reports %zu of %u members\n", got, SLOTS);
         }
 
         /* The next one is told the room is full, not silently accepted. */
