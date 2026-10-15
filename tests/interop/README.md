@@ -57,12 +57,28 @@ Expected transcript:
 ```
 [PASS] join.success - reply id=2 (want 2)
 [PASS] game_info.send - name='Pokemon Scarlet' id=01006F8002320000
-[PASS] proxy_packet.send - 7-byte payload
+[PASS] proxy_packet.send - 7-byte payload, zstd-compressed
 [PASS] ldn_scan.send - scan + 15-byte passphrase
 ```
+
+The `proxy_packet` stage is the one that matters for the console→emulator
+direction: the peer compresses the payload with zstd exactly as
+`ProxySocket::SendPacket` does, and the bridge has to decompress it before the
+bytes could ever reach a console on the air. Sending it plaintext makes the
+bridge log `IdProxyPacket payload is not a zstd frame`, which is how you can
+tell the relay path is actually being exercised.
 
 ## `prod.keys`
 
 `tests/interop/prod.keys` is **synthetic**. The emulator leg never touches the
 LDN console crypto (that only guards the 802.11 leg against a real Switch), so
 any 16-byte values work; the harness only needs the file to parse.
+
+## What interop cannot cover
+
+`radio` is stubbed out in `tests/bridge_harness.c`, so no 802.11 frames exist
+and `radio_rx()` never fires. That means the **console to emulator** direction is
+not observable here: the bridge's uplink for the Room transport
+(`room_send_proxy_packet`) and its zstd round-trip are covered by
+`tests/test_room_wire.c` instead, and the downlink is what the `proxy_packet`
+stage above exercises.

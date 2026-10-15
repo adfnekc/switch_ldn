@@ -800,6 +800,100 @@ int main(void)
     }
     printf("drain: %u datagrams in a single poll (expected 8)\n", drained);
 
+    /* ================================================================ */
+    /* IdProxyPacket in the console -> room direction                    */
+    /* ================================================================ */
+    /*
+     * This is the real-console game-traffic uplink. It is laid out exactly as
+     * Eden's RoomMember::SendProxyPacket writes it, so it must parse back the
+     * same way Eden's ProxySocket::HandleProxyPacket expects: the two Domain
+     * values are INET (1), the protocol is Eden's Protocol::UDP (4, not the IP
+     * header's 17), and the payload is a zstd frame because only the receiving
+     * game socket decompresses.
+     */
+    {
+        static const uint16_t PROXY_PORT = (uint16_t)(PORT + 6);
+        RoomServer *px = room_server_create("127.0.0.1", PROXY_PORT, NULL, NULL, "px",
+                                            "d", "h", LDN_NODE_MAX);
+        assert(px != NULL);
+        int s = socket(AF_INET, SOCK_DGRAM, 0);
+        assert(s >= 0);
+        struct sockaddr_in a2;
+        memset(&a2, 0, sizeof(a2));
+        a2.sin_family = AF_INET;
+        a2.sin_port = htons(PROXY_PORT);
+        inet_pton(AF_INET, "127.0.0.1", &a2.sin_addr);
+        assert(connect(s, (struct sockaddr *)&a2, sizeof(a2)) == 0);
+
+        uint8_t jr[256];
+        size_t jl = build_join_request(jr, "console0");
+        assert(send(s, jr, jl, 0) == (ssize_t)jl);
+        room_server_poll(px, 0);
+        uint8_t rr[8];
+        assert(recv(s, rr, sizeof(rr), 0) == 5 && rr[0] == IdJoinSuccess);
+        int who = room_server_find_by_fake_ip(px, rr + 1);
+        assert(who > 0);
+        /* the fake IP we assigned is the room member's identity */
+        uint8_t myip[4];
+        memcpy(myip, rr + 1, 4);
+        uint8_t guestip[4] = {10, 114, 0, 1};
+
+        /* a join broadcasts IdRoomInformation; consume it first */
+        for (int k = 0; k < 8; k++) {
+            if (recv(s, rr, sizeof(rr), MSG_DONTWAIT) <= 0) {
+                break;
+            }
+            room_server_poll(px, 0);
+        }
+
+        static const char payload[] = "LDN_PASS!hello from the console";
+        assert(room_send_proxy_packet(px, who, myip, 40000, guestip, 30000, false,
+                                      payload, (uint32_t)sizeof(payload) - 1) == 0);
+
+        uint8_t buf[4096];
+        ssize_t got = recv(s, buf, sizeof(buf), 0);
+        assert(got > 0);
+        assert(buf[0] == IdProxyPacket);
+
+        size_t o = 1;
+        assert(buf[o] == ROOM_DOMAIN_INET);
+        o += 1;
+        assert(o + 4 <= (size_t)got && memcmp(buf + o, myip, 4) == 0);
+        o += 4;
+        assert(o + 2 <= (size_t)got && rd_be16(buf + o) == 40000);
+        o += 2;
+        assert(buf[o] == ROOM_DOMAIN_INET);
+        o += 1;
+        assert(o + 4 <= (size_t)got && memcmp(buf + o, guestip, 4) == 0);
+        o += 4;
+        assert(o + 2 <= (size_t)got && rd_be16(buf + o) == 30000);
+        o += 2;
+        assert(buf[o] == ROOM_PROTOCOL_UDP);
+        o += 1;
+        assert(buf[o] == 0); /* broadcast */
+        o += 1;
+
+        uint32_t dlen = rd_be32(buf + o);
+        o += 4;
+        assert(o + dlen == (size_t)got); /* nothing dropped, nothing trailing */
+
+        /* and the payload must round-trip through the same zstd step */
+        uint8_t plain[2304];
+        int plen = room_proxy_decompress(buf + o, dlen, plain, sizeof(plain));
+        assert(plen == (int)(sizeof(payload) - 1));
+        assert(memcmp(plain, payload, (size_t)plen) == 0);
+        printf("IdProxyPacket: %zd bytes, domain=INET proto=UDP, payload round-trips"
+               " (%d bytes)\n",
+               got, plen);
+
+        /* a non-zstd payload must be rejected, not relayed as garbage */
+        assert(room_proxy_decompress((const uint8_t *)payload, sizeof(payload) - 1,
+                                     plain, sizeof(plain)) == -1);
+
+        close(s);
+        room_server_destroy(px);
+    }
+
     printf("room wire format matches Eden\n");
     close(udp);
     room_server_destroy(server);

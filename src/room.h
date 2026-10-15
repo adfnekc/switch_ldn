@@ -192,4 +192,44 @@ void room_send_ldn_packet(RoomServer *server, int member_id, LDNPacketType type,
                           const uint8_t local_ip[4], const uint8_t remote_ip[4],
                           bool broadcast, const void *data, uint32_t data_len);
 
+/*
+ * Network::Domain and Network::Protocol in Eden / yuzu.
+ *
+ * These are NOT the values used on the wire elsewhere: Domain::INET is 1, and
+ * Protocol::UDP is 4, not the IP header's protocol number 17. Getting this
+ * wrong makes Eden reject the packet silently in ProxySocket::HandleProxyPacket,
+ * which compares packet.protocol against its own socket's protocol.
+ */
+#define ROOM_DOMAIN_INET 1
+#define ROOM_PROTOCOL_UDP 4
+
+/*
+ * Relay real-console game traffic into the room as an IdProxyPacket.
+ *
+ * local_* is the sender (the console's LDN address), remote_* the recipient
+ * (the emulator's game socket). The payload is ZSTD-compressed because
+ * ProxySocket::SendPacket compresses before transmitting and
+ * ProxySocket::HandleProxyPacket decompresses on receipt, so the room member
+ * will not accept anything else.
+ *
+ * Returns 0 on success, -1 if the datagram could not be built or sent.
+ */
+int room_send_proxy_packet(RoomServer *server, int member_id,
+                          const uint8_t local_ip[4], uint16_t local_port,
+                          const uint8_t remote_ip[4], uint16_t remote_port,
+                          bool broadcast, const void *data, uint32_t data_len);
+
+/*
+ * Decompress the ZSTD payload carried in an IdProxyPacket.
+ *
+ * Needed because the bridge is the relay, not the final consumer: Eden
+ * compresses in ProxySocket::SendPacket and only the receiving game socket
+ * decompresses, so without this the console would be handed compressed bytes.
+ *
+ * Returns the number of bytes written, or -1 if the input is not a valid ZSTD
+ * frame.
+ */
+int room_proxy_decompress(const uint8_t *in, size_t in_len, uint8_t *out,
+                          size_t out_cap);
+
 #endif /* SWITCH_LDN_ROOM_H */

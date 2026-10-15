@@ -3,7 +3,7 @@ CFLAGS  ?= -O2 -g -std=gnu11 -Wall -Wextra -Wno-unused-parameter
 # OpenSSL 3 deprecates the low-level AES API; the EVP layer needs more plumbing for now.
 CFLAGS  += -Wno-deprecated-declarations
 CPPFLAGS = -D_GNU_SOURCE
-LDLIBS   = -lcrypto
+LDLIBS   = -lcrypto -lzstd
 
 SRCDIR := src
 OBJDIR := build
@@ -90,7 +90,7 @@ build/bridge_harness: tests/bridge_harness.c $(BRIDGE_OBJS) | $(OBJDIR)
 build/room_peer: tests/interop/room/room_peer.cpp tests/interop/room/packet.cpp \
                  tests/interop/room/packet.h tests/interop/room/common_types.h | $(OBJDIR)
 	g++ -std=c++20 -O2 -Wall -Wextra -Itests/interop/room -o $@ \
-	    tests/interop/room/room_peer.cpp tests/interop/room/packet.cpp
+	    tests/interop/room/room_peer.cpp tests/interop/room/packet.cpp -lzstd
 
 interop: build/bridge_harness build/room_peer tests/interop/prod.keys
 	@./build/bridge_harness >build/interop.log 2>&1 & bp=$$!; \

@@ -115,49 +115,84 @@ static bool parse_udp(const uint8_t *eth, size_t len, const uint8_t **udp,
     return true;
 }
 
+/*
+ * Real-console game traffic has to reach the emulator, whichever transport it
+ * is using. RyuLdn takes it as ProxyData, the Room transport as an IdProxyPacket
+ * - two encodings of the same thing, which is why they share the parse above.
+ */
 static void deliver_to_guest(Bridge *b, const uint8_t *eth, size_t len)
 {
-    if (!b->guest) {
-        warn_guest_gone("radio->guest");
-        return;
-    }
-
     const uint8_t *udp;
     size_t udp_len;
     uint16_t sport, dport;
     uint32_t src_ip, dst_ip;
+
     if (!parse_udp(eth, len, &udp, &udp_len, &sport, &dport, &src_ip, &dst_ip)) {
         return;
     }
 
-    /* Broadcast on the LDN mesh has to fan out to every guest. */
-    bool broadcast = (ntohl(dst_ip) & 0xFF) == 0xFF;
+    if (b->guest) {
+        /* Broadcast on the LDN mesh has to fan out to every guest. */
+        bool broadcast = (ntohl(dst_ip) & 0xFF) == 0xFF;
 
-    RyuLdnProxyInfo info;
-    memset(&info, 0, sizeof(info));
-    info.source_ipv4 = src_ip;
+        RyuLdnProxyInfo info;
+        memset(&info, 0, sizeof(info));
+        info.source_ipv4 = src_ip;
 
-    /*
-     * Broadcast must sit in the guest's own subnet. The RyuLdn default
-     * (10.114.0.0/16) makes 0x0A72FFFF look right, but the Room transport's
-     * fake IPs are 192.168.x.y, so a hard-coded value sends the packet to a
-     * subnet nobody is listening on. Derive it from what we handed out.
-     */
-    uint32_t guest_be = b->guest_proxy_ip; /* dotted quad, big-endian in a u32 */
-    uint32_t guest_host = ntohl(guest_be);
-    uint32_t subnet = guest_host & 0xFFFF0000u;
-    info.dest_ipv4 = broadcast ? htonl(subnet | 0x0000FFFFu) : b->guest_proxy_ip;
-    info.source_port = sport;
-    info.dest_port = dport;
-    info.protocol = 17;
+        /*
+         * Broadcast must sit in the guest's own subnet. The RyuLdn default
+         * (10.114.0.0/16) makes 0x0A72FFFF look right, but the Room transport's
+         * fake IPs are 192.168.x.y, so a hard-coded value sends the packet to a
+         * subnet nobody is listening on. Derive it from what we handed out.
+         */
+        uint32_t guest_be = b->guest_proxy_ip; /* dotted quad, big-endian in a u32 */
+        uint32_t guest_host = ntohl(guest_be);
+        uint32_t subnet = guest_host & 0xFFFF0000u;
+        info.dest_ipv4 = broadcast ? htonl(subnet | 0x0000FFFFu) : b->guest_proxy_ip;
+        info.source_port = sport;
+        info.dest_port = dport;
+        info.protocol = 17;
 
-    ryuldn_send_proxy_data(b->guest, info, udp, udp_len);
-    LOG_T("radio->guest %u.%u.%u.%u:%u -> %u.%u.%u.%u:%u (%zu bytes)",
-          (ntohl(src_ip) >> 24) & 0xFF, (ntohl(src_ip) >> 16) & 0xFF,
-          (ntohl(src_ip) >> 8) & 0xFF, ntohl(src_ip) & 0xFF, sport,
-          (ntohl(info.dest_ipv4) >> 24) & 0xFF, (ntohl(info.dest_ipv4) >> 16) & 0xFF,
-          (ntohl(info.dest_ipv4) >> 8) & 0xFF, ntohl(info.dest_ipv4) & 0xFF, dport,
-          udp_len);
+        ryuldn_send_proxy_data(b->guest, info, udp, udp_len);
+        LOG_T("radio->guest %u.%u.%u.%u:%u -> %u.%u.%u.%u:%u (%zu bytes)",
+              (ntohl(src_ip) >> 24) & 0xFF, (ntohl(src_ip) >> 16) & 0xFF,
+              (ntohl(src_ip) >> 8) & 0xFF, ntohl(src_ip) & 0xFF, sport,
+              (ntohl(info.dest_ipv4) >> 24) & 0xFF, (ntohl(info.dest_ipv4) >> 16) & 0xFF,
+              (ntohl(info.dest_ipv4) >> 8) & 0xFF, ntohl(info.dest_ipv4) & 0xFF, dport,
+              udp_len);
+        return;
+    }
+
+    if (b->room_member) {
+        /*
+         * The emulator's game socket is addressed by the LDN IP we published for
+         * it, and the console is identified by its own LDN IP. From Eden's point
+         * of view local_* is the sender and remote_* the recipient, which is
+         * what ProxySocket::HandleProxyPacket matches its own local port
+         * against.
+         */
+        uint32_t src_host = ntohl(src_ip);
+        uint8_t local_ip[4] = {(uint8_t)(src_host >> 24), (uint8_t)(src_host >> 16),
+                               (uint8_t)(src_host >> 8), (uint8_t)src_host};
+        uint32_t guest_host = ntohl(b->guest_proxy_ip);
+        uint8_t remote_ip[4] = {(uint8_t)(guest_host >> 24), (uint8_t)(guest_host >> 16),
+                                (uint8_t)(guest_host >> 8), (uint8_t)guest_host};
+        bool rbroadcast = (ntohl(dst_ip) & 0xFF) == 0xFF;
+        if (room_send_proxy_packet(b->room_server, b->room_member, local_ip, sport,
+                                   remote_ip, dport, rbroadcast, udp,
+                                   (uint32_t)udp_len) != 0) {
+            LOG_W("radio->room: console frame to %u.%u.%u.%u:%u was not relayed",
+                  remote_ip[0], remote_ip[1], remote_ip[2], remote_ip[3], dport);
+            return;
+        }
+        LOG_T("radio->room %u.%u.%u.%u:%u -> %u.%u.%u.%u:%u (%zu bytes)",
+              (src_host >> 24) & 0xFF, (src_host >> 16) & 0xFF, (src_host >> 8) & 0xFF,
+              src_host & 0xFF, sport, remote_ip[0], remote_ip[1], remote_ip[2],
+              remote_ip[3], dport, udp_len);
+        return;
+    }
+
+    warn_guest_gone("radio->guest");
 }
 
 /* ------------------------------------------------------------------ */
@@ -789,7 +824,23 @@ static void room_on_packet(RoomServer *server, int member_id, const RoomPacketIn
                              : rd_be32(pkt->remote_ip);
         info.dest_port = pkt->remote_port;
         info.protocol = pkt->protocol;
-        deliver_from_guest(b, info, pkt->data, pkt->data_len);
+
+        /*
+         * ProxySocket::SendPacket ZSTD-compresses every payload and only the
+         * receiving game socket decompresses it, so the relay has to undo it
+         * or the console would be handed compressed bytes. Fail loudly rather
+         * than emit garbage onto the air.
+         */
+        uint8_t plain[2304];
+        int plain_len = room_proxy_decompress(pkt->data, pkt->data_len, plain,
+                                              sizeof(plain));
+        if (plain_len < 0) {
+            LOG_E("room: IdProxyPacket payload is not a zstd frame (%u bytes); "
+                  "dropping it",
+                  pkt->data_len);
+            return;
+        }
+        deliver_from_guest(b, info, plain, (size_t)plain_len);
         return;
     }
 

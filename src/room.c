@@ -8,6 +8,8 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
+#include <zstd.h>
+
 #include "common.h"
 
 /* ------------------------------------------------------------------ */
@@ -493,6 +495,79 @@ void room_send_ldn_packet(RoomServer *server, int member_id, LDNPacketType type,
     }
 
     send_to(server, m, p.buf, p.len);
+}
+
+/* ------------------------------------------------------------------ */
+/* Proxy relay (game traffic into the room)                           */
+/* ------------------------------------------------------------------ */
+
+int room_proxy_decompress(const uint8_t *in, size_t in_len, uint8_t *out,
+                          size_t out_cap)
+{
+    if (!in || !out || !in_len) {
+        return -1;
+    }
+    unsigned long long want = ZSTD_getFrameContentSize(in, in_len);
+    if (want == ZSTD_CONTENTSIZE_ERROR || want == ZSTD_CONTENTSIZE_UNKNOWN ||
+        want > out_cap) {
+        return -1;
+    }
+    size_t got = ZSTD_decompress(out, out_cap, in, in_len);
+    if (ZSTD_isError(got) || got != want) {
+        return -1;
+    }
+    return (int)got;
+}
+
+int room_send_proxy_packet(RoomServer *server, int member_id,
+                          const uint8_t local_ip[4], uint16_t local_port,
+                          const uint8_t remote_ip[4], uint16_t remote_port,
+                          bool broadcast, const void *data, uint32_t data_len)
+{
+    MemberSlot *m = find_by_id(server, member_id);
+    if (!m || !data || !data_len) {
+        return -1;
+    }
+
+    /*
+     * Compress first: the room member decompresses unconditionally, so a
+     * plaintext payload would be rejected as a malformed frame.
+     */
+    uint8_t compressed[PACKET_BUFSIZE];
+    size_t clen = ZSTD_compress(compressed, sizeof(compressed), data, data_len,
+                                ZSTD_CLEVEL_DEFAULT);
+    if (ZSTD_isError(clen)) {
+        LOG_E("room: zstd compress failed: %s", ZSTD_getErrorName(clen));
+        return -1;
+    }
+
+    Packet p;
+    pk_begin(&p);
+    pk_u8(&p, IdProxyPacket);
+    pk_u8(&p, ROOM_DOMAIN_INET);
+    pk_raw(&p, local_ip, 4);
+    pk_u16(&p, local_port);
+    pk_u8(&p, ROOM_DOMAIN_INET);
+    pk_raw(&p, remote_ip, 4);
+    pk_u16(&p, remote_port);
+    pk_u8(&p, ROOM_PROTOCOL_UDP);
+    pk_u8(&p, broadcast ? 1 : 0);
+    /* std::vector<u8> on the wire is a u32 length prefix followed by the bytes. */
+    pk_u32(&p, (uint32_t)clen);
+    pk_raw(&p, compressed, clen);
+
+    if (!p.ok) {
+        LOG_E("room: IdProxyPacket does not fit in %zu bytes", PACKET_BUFSIZE);
+        return -1;
+    }
+
+    send_to(server, m, p.buf, p.len);
+    LOG_T("room: IdProxyPacket %u.%u.%u.%u:%u -> %u.%u.%u.%u:%u (%zu bytes on the "
+          "wire, %u of payload)",
+          local_ip[0], local_ip[1], local_ip[2], local_ip[3], local_port,
+          remote_ip[0], remote_ip[1], remote_ip[2], remote_ip[3], remote_port,
+          p.len, data_len);
+    return 0;
 }
 
 /* ------------------------------------------------------------------ */

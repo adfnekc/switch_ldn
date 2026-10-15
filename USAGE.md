@@ -21,6 +21,11 @@
 | **Eden** | Room over UDP | `24872` | ✅ | 需先打 `patches/eden-room-passphrase.patch` |
 | **Citron / Sudachi / yuzu** | Room over UDP | `24872` | ✅ | 同 Eden |
 
+两条传输都支持双向真实游戏流量：`IdProxyPacket`（Room）与 `ProxyData`（RyuLdn）互为镜像。
+注意 Room 侧有两个字段**不是** IP 头的编号——`Domain::INET = 1`、`Protocol::UDP = 4`（不是 17），
+且 payload 必须经过 zstd 压缩，因为 Eden 只在最终的游戏 socket 侧解压
+（`ProxySocket::SendPacket` 压缩 / `HandleProxyPacket` 解压），桥作为中继必须自己解压还原。
+
 ## 场景 A：Ryubing（最省事，推荐先跑通）
 
 ```bash
