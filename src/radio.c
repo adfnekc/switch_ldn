@@ -8,9 +8,12 @@
 #include <netinet/if_ether.h>
 #include <netinet/in.h>
 #include <poll.h>
+#include <stddef.h>
 #include <string.h>
 #include <sys/ioctl.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
+#include <sys/un.h>
 #include <linux/wireless.h>
 #include <unistd.h>
 
@@ -21,6 +24,15 @@ typedef struct Radio {
 
     int ap_fd;   /* AF_PACKET, ethertype capture on the AP interface */
     int mon_fd;  /* AF_PACKET, injected frames on the monitor interface */
+
+    /* Socket backend: one bound AF_UNIX datagram socket standing in for both
+     * interfaces above. The peer is whoever sent the first datagram, and it
+     * stays the console until the bridge is closed. */
+    bool socket_backend;
+    bool have_peer;
+    bool peer_warned;
+    struct sockaddr_un peer;
+    socklen_t peer_len;
 
     radio_rx_cb rx_cb;
     void *user;
@@ -202,6 +214,58 @@ static int packet_open(const char *iface, int protocol, int *out_idx)
     return fd;
 }
 
+/*
+ * Bind the socket radio backend. A stale path from a previous run would make
+ * bind() fail with EADDRINUSE, so it is removed first; ENOENT (the normal
+ * case) is not an error.
+ */
+static int radio_socket_open(const char *path)
+{
+    if (unlink(path) < 0 && errno != ENOENT) {
+        LOG_W("cannot unlink stale %s: %s", path, strerror(errno));
+    }
+
+    int fd = socket(AF_UNIX, SOCK_DGRAM, 0);
+    if (fd < 0) {
+        LOG_E("socket(AF_UNIX, SOCK_DGRAM, %s): %s", path, strerror(errno));
+        return -1;
+    }
+
+    struct sockaddr_un addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sun_family = AF_UNIX;
+    size_t plen = strlen(path);
+    if (plen >= sizeof(addr.sun_path)) {
+        plen = sizeof(addr.sun_path) - 1;
+    }
+    memcpy(addr.sun_path, path, plen); /* addr is already zero-filled */
+    socklen_t alen = (socklen_t)(offsetof(struct sockaddr_un, sun_path) +
+                                 strnlen(addr.sun_path,
+                                         sizeof(addr.sun_path)) + 1);
+
+    if (bind(fd, (struct sockaddr *)&addr, alen) < 0) {
+        LOG_E("bind(%s): %s", path, strerror(errno));
+        close(fd);
+        return -1;
+    }
+    /* Local-only debug channel: no other user should be able to listen in. */
+    if (chmod(path, 0600) < 0) {
+        LOG_W("chmod(%s, 0600): %s", path, strerror(errno));
+    }
+    return fd;
+}
+
+/* Nothing has arrived from a console yet, so there is nobody to send to. */
+static void radio_warn_no_peer(Radio *radio)
+{
+    if (radio->peer_warned) {
+        return;
+    }
+    radio->peer_warned = true;
+    LOG_W("no console attached to the radio socket (%s)",
+          radio->cfg.radio_socket);
+}
+
 /* ------------------------------------------------------------------ */
 /* Frame classification                                               */
 /* ------------------------------------------------------------------ */
@@ -311,11 +375,54 @@ build:
     r->rx_cb(&f, r->user);
 }
 
+/*
+ * Remember which peer is the console. Learned from the source address of the
+ * first datagram; ignored afterwards so a second caller cannot steal the
+ * stream mid-session.
+ */
+static void learn_peer(Radio *r, const struct sockaddr *sa, socklen_t len)
+{
+    if (!r->socket_backend || r->have_peer || !sa || len == 0 ||
+        sa->sa_family != AF_UNIX) {
+        return;
+    }
+    if (len > sizeof(r->peer)) {
+        len = sizeof(r->peer);
+    }
+    memset(&r->peer, 0, sizeof(r->peer));
+    memcpy(&r->peer, sa, (size_t)len);
+    r->peer_len = len;
+    r->have_peer = true;
+    LOG_I("radio: console attached to radio socket (peer path %s)",
+          r->peer.sun_path[0] ? r->peer.sun_path : "<unnamed>");
+}
+
+/*
+ * Read one pending datagram. On the socket backend recvfrom() is used so we
+ * also learn the peer; the AF_PACKET path keeps the plain recv() it always
+ * had, so its behaviour is byte-identical.
+ */
+static ssize_t pump_read(Radio *r, int fd, uint8_t *buf, size_t cap)
+{
+    if (!r->socket_backend) {
+        return recv(fd, buf, cap, MSG_DONTWAIT);
+    }
+    struct sockaddr_storage from;
+    memset(&from, 0, sizeof(from));
+    socklen_t fromlen = sizeof(from);
+    ssize_t n = recvfrom(fd, buf, cap, MSG_DONTWAIT, (struct sockaddr *)&from,
+                         &fromlen);
+    if (n > 0) {
+        learn_peer(r, (const struct sockaddr *)&from, fromlen);
+    }
+    return n;
+}
+
 static void pump_ap(Radio *r)
 {
     for (int i = 0; i < 16; i++) {
         uint8_t buf[2304];
-        ssize_t n = recv(r->ap_fd, buf, sizeof(buf), MSG_DONTWAIT);
+        ssize_t n = pump_read(r, r->ap_fd, buf, sizeof(buf));
         if (n <= 0) {
             return;
         }
@@ -340,7 +447,7 @@ static void pump_monitor(Radio *r)
 {
     for (int i = 0; i < 16; i++) {
         uint8_t buf[2304];
-        ssize_t n = recv(r->mon_fd, buf, sizeof(buf), MSG_DONTWAIT);
+        ssize_t n = pump_read(r, r->mon_fd, buf, sizeof(buf));
         if (n <= 0) {
             return;
         }
@@ -365,6 +472,29 @@ Radio *radio_open(const RadioConfig *cfg, radio_rx_cb rx_cb, void *user)
     r->user = user;
     r->adv_interval_ms = 100; /* LDN advertises every 100 ms */
     r->last_adv_ms = now_ms();
+
+    /*
+     * Socket backend. One bound Unix datagram socket replaces both raw
+     * sockets, so the bridge can be driven - and CI-tested - without root or a
+     * wireless NIC. The peer is discovered on the first inbound datagram.
+     */
+    if (cfg->radio_socket[0]) {
+        int fd = radio_socket_open(cfg->radio_socket);
+        if (fd < 0) {
+            radio_close(r);
+            return NULL;
+        }
+        r->ap_fd = fd;
+        r->mon_fd = fd;
+        r->socket_backend = true;
+        if (cfg->mon_iface[0]) {
+            LOG_W("--mon-iface %s ignored on the radio socket: one fd serves both",
+                  cfg->mon_iface);
+        }
+        LOG_I("radio: socket backend on %s (no wireless NIC needed)",
+              cfg->radio_socket);
+        return r;
+    }
 
     if (strlen(cfg->mon_iface)) {
         int idx;
@@ -393,7 +523,8 @@ void radio_close(Radio *radio)
     if (radio->ap_fd >= 0) {
         close(radio->ap_fd);
     }
-    if (radio->mon_fd >= 0) {
+    /* On the socket backend ap_fd and mon_fd are the same descriptor. */
+    if (radio->mon_fd >= 0 && radio->mon_fd != radio->ap_fd) {
         close(radio->mon_fd);
     }
     free(radio);
@@ -408,7 +539,19 @@ int radio_send(Radio *radio, const uint8_t *frame, size_t len)
     if (radio->ap_fd < 0 || len < 2) {
         return -1;
     }
-    ssize_t n = send(radio->ap_fd, frame, len, MSG_DONTWAIT);
+    if (radio->socket_backend && !radio->have_peer) {
+        radio_warn_no_peer(radio);
+        return -1;
+    }
+    ssize_t n;
+    if (radio->socket_backend) {
+        /* sendto() re-resolves the peer's path, so the console must keep its
+         * socket bound for as long as the bridge is talking to it. */
+        n = sendto(radio->ap_fd, frame, len, MSG_DONTWAIT,
+                   (struct sockaddr *)&radio->peer, radio->peer_len);
+    } else {
+        n = send(radio->ap_fd, frame, len, MSG_DONTWAIT);
+    }
     if (n < 0) {
         LOG_E("radio_send: %s", strerror(errno));
         return -1;
@@ -422,6 +565,23 @@ int radio_send_action_frame(Radio *radio, const uint8_t *body, size_t len)
         LOG_W("radio_send_action_frame: no radio attached");
         return -1;
     }
+
+    /* Same 802.11 frame, just delivered to the socket peer instead of the
+     * monitor interface. */
+    if (radio->socket_backend) {
+        if (!radio->have_peer) {
+            radio_warn_no_peer(radio);
+            return -1;
+        }
+        ssize_t n = sendto(radio->mon_fd, body, len, MSG_DONTWAIT,
+                           (struct sockaddr *)&radio->peer, radio->peer_len);
+        if (n < 0) {
+            LOG_E("radio_send_action_frame: %s", strerror(errno));
+            return -1;
+        }
+        return 0;
+    }
+
     if (radio->mon_fd < 0) {
         LOG_E("no monitor interface configured for action frame injection");
         return -1;
@@ -451,11 +611,17 @@ void radio_poll(Radio *radio, int timeout_ms)
         LOG_W("radio_poll: no radio attached");
         return;
     }
+    /*
+     * One fd covers both roles on the socket backend, so pumping the monitor
+     * fd as well would drain the queue before pump_ap() ever sees a frame.
+     */
+    bool have_monitor = radio->mon_fd >= 0 && !radio->socket_backend;
+
     struct pollfd fds[2];
     fds[0].fd = radio->ap_fd;
     fds[0].events = POLLIN;
     size_t n = 1;
-    if (radio->mon_fd >= 0) {
+    if (have_monitor) {
         fds[n].fd = radio->mon_fd;
         fds[n].events = POLLIN;
         n++;
@@ -465,7 +631,7 @@ void radio_poll(Radio *radio, int timeout_ms)
     if (rc <= 0) {
         return;
     }
-    if (radio->mon_fd >= 0 && (fds[1].revents & POLLIN)) {
+    if (have_monitor && (fds[1].revents & POLLIN)) {
         pump_monitor(radio);
     }
     if (fds[0].revents & POLLIN) {

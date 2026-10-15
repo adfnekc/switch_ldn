@@ -874,9 +874,43 @@ static void radio_rx(const RadioFrame *frame, void *user)
         return;
     }
 
-    uint16_t ethertype = rd_be16(frame->frame + 12);
+    /*
+     * Never read an EtherType out of frame->frame + 12.
+     *
+     * radio.c's emit() normalises everything it receives into a frame with a
+     * *synthesised* 24-byte 802.11 header, so +12..13 is part of addr2 - the
+     * sender's MAC - not an EtherType. Matching against it silently disabled
+     * both branches below: LDN control frames never reached the host FSM, so
+     * no console could ever authenticate, and Pia traffic never reached the
+     * emulator.
+     *
+     * LDN control frames are identified by their vendor-specific action
+     * header, the same marker ldn_parse_auth_frame() looks for.
+     */
+    const uint8_t *body = frame->frame + IEEE80211_HDRLEN;
 
-    if (ethertype == ETH_P_LDN) {
+    /*
+     * Two LDN framings exist and they are NOT the same:
+     *
+     *   - the advertisement, from ldn_build_advertisement_action_frame():
+     *     cat(1) OUI(3) proto(1) pad(1) type(2), so the type is at +6;
+     *   - the auth/disconnect control frames, from build_88b7_header():
+     *     OUI(3) type(2) pad(1), so the type is at +3.
+     *
+     * Both carry the 00:22:AA OUI, so identify them by the OUI and then by
+     * the type at whichever offset that framing uses.
+     */
+    bool is_advertisement =
+        frame->frame_len >= IEEE80211_HDRLEN + 12 &&
+        body[0] == LDN_CATEGORY_VENDOR_SPECIFIC && body[1] == LDN_OUI_0 &&
+        body[2] == LDN_OUI_1 && body[3] == LDN_OUI_2 && body[4] == LDN_PROTOCOL_ID &&
+        rd_be16(body + 6) == LDN_PACKET_ADVERTISEMENT;
+    bool is_control =
+        frame->frame_len >= IEEE80211_HDRLEN + 5 && body[0] == LDN_OUI_0 &&
+        body[1] == LDN_OUI_1 && body[2] == LDN_OUI_2 &&
+        rd_be16(body + 3) == LDN_PACKET_AUTHENTICATION;
+
+    if (is_advertisement || is_control) {
         /* LDN control frames (auth/disconnect) - the host FSM owns those. */
         if (b->host) {
             host_handle_frame(b->host, b->radio, frame);
@@ -884,11 +918,24 @@ static void radio_rx(const RadioFrame *frame, void *user)
         return;
     }
 
-    if (ethertype == 0x0800) {
-        /* IPv4 = Pia mesh traffic; relay it to the emulator guest. */
-        deliver_to_guest(b, frame->frame, frame->frame_len);
+    /*
+     * Otherwise it is Pia mesh traffic. emit() stripped whatever encapsulation
+     * the frame arrived with, so what follows the 802.11 header is the IP
+     * packet. Re-attach an Ethernet header over it, because that is the shape
+     * parse_udp() and build_udp_frame() already speak, which also keeps the
+     * two directions symmetric.
+     */
+    size_t payload_len = frame->frame_len - IEEE80211_HDRLEN;
+    uint8_t eth[14 + 2304];
+    if (payload_len + 14 > sizeof(eth)) {
+        LOG_E("radio->guest: %zu-byte payload does not fit, dropping it", payload_len);
         return;
     }
+    memcpy(eth, frame->dst_mac, 6);
+    memcpy(eth + 6, frame->src_mac, 6);
+    wr_be16(eth + 12, 0x0800);
+    memcpy(eth + 14, body, payload_len);
+    deliver_to_guest(b, eth, payload_len + 14);
 }
 
 /* ------------------------------------------------------------------ */
@@ -905,11 +952,15 @@ static const char *k_usage =
     "  # supplies the passphrase, the title id and the local communication\n"
     "  # version, so prod.keys is the only thing the bridge needs from you.\n"
     "  switch_ldn --ap-iface wlan0 --mon-iface wlan0 --channel 1 --prodkeys prod.keys\n"
+    "  switch_ldn --radio-socket /tmp/ldn-console.sock --prodkeys prod.keys\n"
     "\n"
     "Options:\n"
     "  --selfcheck <if>       probe the NIC (mode, freq, VIF support) and exit\n"
-    "  --ap-iface <if>        interface managed by hostapd (required)\n"
+    "  --ap-iface <if>        interface managed by hostapd\n"
     "  --mon-iface <if>       interface in monitor mode for action frames\n"
+    "  --radio-socket <path>  Unix datagram socket standing in for the radio,\n"
+    "                         so a fake console can talk to the bridge with no\n"
+    "                         NIC and no root. --ap-iface becomes optional.\n"
     "  --channel <n>          LDN channel: 1/6/11 (2.4G) or 36-48 (5G).\n"
     "                         Used as the default until the game picks one.\n"
     "  --band <2|5>           band, default 2\n"
@@ -935,6 +986,7 @@ int main(int argc, char **argv)
         {"selfcheck", required_argument, 0, 'S'},
         {"ap-iface", required_argument, 0, 'a'},
         {"mon-iface", required_argument, 0, 'm'},
+        {"radio-socket", required_argument, 0, 's'},
         {"channel", required_argument, 0, 'c'},
         {"band", required_argument, 0, 'b'},
         {"prodkeys", required_argument, 0, 'k'},
@@ -950,6 +1002,7 @@ int main(int argc, char **argv)
 
     const char *ap_iface = NULL;
     const char *mon_iface = NULL;
+    const char *radio_socket = NULL;
     const char *prodkeys_path = NULL;
     const char *host_name = "Player";
     const char *bind_addr = "127.0.0.1";
@@ -967,6 +1020,7 @@ int main(int argc, char **argv)
         case 'S': selfcheck_iface = optarg; break;
         case 'a': ap_iface = optarg; break;
         case 'm': mon_iface = optarg; break;
+        case 's': radio_socket = optarg; break;
         case 'c': channel = (uint8_t)atoi(optarg); break;
         case 'b': band = (uint8_t)atoi(optarg); break;
         case 'k': prodkeys_path = optarg; break;
@@ -998,8 +1052,8 @@ int main(int argc, char **argv)
     }
 
     /* ---------------- live mode ---------------- */
-    if (!ap_iface) {
-        LOG_E("--ap-iface is required in live mode");
+    if (!ap_iface && !radio_socket) {
+        LOG_E("either --ap-iface or --radio-socket is required in live mode");
         fputs(k_usage, stderr);
         return 1;
     }
@@ -1047,17 +1101,42 @@ int main(int argc, char **argv)
 
     RadioConfig rcfg;
     memset(&rcfg, 0, sizeof(rcfg));
-    strncpy(rcfg.ap_iface, ap_iface, sizeof(rcfg.ap_iface) - 1);
-    strncpy(rcfg.mon_iface, mon_iface ? mon_iface : ap_iface,
-            sizeof(rcfg.mon_iface) - 1);
+    if (radio_socket) {
+        /*
+         * Socket backend: no NIC, no root, and the peer is a separate process
+         * speaking the bridge's own framing. The MAC is fixed and locally
+         * administered so a fake console has something stable to address.
+         */
+        static const uint8_t socket_mac[6] = {0x02, 0x4A, 0x57, 0x53, 0x53, 0x4B};
+        strncpy(rcfg.radio_socket, radio_socket, sizeof(rcfg.radio_socket) - 1);
+        if (ap_iface) {
+            strncpy(rcfg.ap_iface, ap_iface, sizeof(rcfg.ap_iface) - 1);
+            strncpy(rcfg.mon_iface, mon_iface ? mon_iface : ap_iface,
+                    sizeof(rcfg.mon_iface) - 1);
+            if (radio_get_hwaddr(ap_iface, rcfg.mac) != 0) {
+                LOG_E("cannot read MAC of %s", ap_iface);
+                return 1;
+            }
+        } else {
+            memcpy(rcfg.mac, socket_mac, sizeof(rcfg.mac));
+        }
+        LOG_I("radio socket: MAC %02x:%02x:%02x:%02x:%02x:%02x to be used by the "
+              "fake console",
+              rcfg.mac[0], rcfg.mac[1], rcfg.mac[2], rcfg.mac[3], rcfg.mac[4],
+              rcfg.mac[5]);
+    } else {
+        strncpy(rcfg.ap_iface, ap_iface, sizeof(rcfg.ap_iface) - 1);
+        strncpy(rcfg.mon_iface, mon_iface ? mon_iface : ap_iface,
+                sizeof(rcfg.mon_iface) - 1);
+        if (radio_get_hwaddr(ap_iface, rcfg.mac) != 0) {
+            LOG_E("cannot read MAC of %s", ap_iface);
+            return 1;
+        }
+        LOG_I("AP MAC %02x:%02x:%02x:%02x:%02x:%02x", rcfg.mac[0], rcfg.mac[1],
+              rcfg.mac[2], rcfg.mac[3], rcfg.mac[4], rcfg.mac[5]);
+    }
     rcfg.channel = channel;
     rcfg.band = band;
-    if (radio_get_hwaddr(ap_iface, rcfg.mac) != 0) {
-        LOG_E("cannot read MAC of %s", ap_iface);
-        return 1;
-    }
-    LOG_I("AP MAC %02x:%02x:%02x:%02x:%02x:%02x", rcfg.mac[0], rcfg.mac[1], rcfg.mac[2],
-          rcfg.mac[3], rcfg.mac[4], rcfg.mac[5]);
 
     b->radio = radio_open(&rcfg, radio_rx, b);
     if (!b->radio) {
@@ -1085,9 +1164,13 @@ int main(int argc, char **argv)
         ryuldn_server_poll(b->server, 0);
         room_server_poll(b->room_server, 0);
 
-        if (radio_config(b->radio)->mon_iface[0]) {
-            radio_poll(b->radio, 50);
-        }
+        /*
+         * Always poll the radio. The AP-interface read is what learns a
+         * console's frames, and on the socket backend it is also how the peer
+         * is discovered - gating this on mon_iface used to leave the socket
+         * backend deaf in both directions.
+         */
+        radio_poll(b->radio, 50);
         if (b->host) {
             host_tick(b->host, b->radio);
 

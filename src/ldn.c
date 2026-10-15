@@ -139,12 +139,18 @@ int ldn_build_advertisement_action_frame(uint8_t *out, size_t out_len,
     wr_be16(payload + 0x22, (uint16_t)adv_data_len);
     memcpy(payload + 0x24, nonce_in, 4);
 
+    /*
+     * The advertise data has to be in place BEFORE hashing. It used to be
+     * copied in after the SHA-256, so the hash covered a payload whose
+     * 0x48..0x548 was still zero - a console that verifies it rejects the
+     * frame, which makes the network visible but impossible to join.
+     */
+    memcpy(payload + 0x48, adv_data_raw, adv_data_len);
+
     /* hash over the whole payload with the hash field zeroed */
-    payload[0x28 + 32] = 0; /* already zero */
     uint8_t digest[32];
     SHA256(payload, sizeof(payload), digest);
     memcpy(payload + 0x28, digest, 32);
-    memcpy(payload + 0x48, adv_data_raw, adv_data_len);
 
     /* AES-CTR over hash||data: 0x28 .. 0x548 (the whole rest of the payload) */
     uint8_t counter[16];

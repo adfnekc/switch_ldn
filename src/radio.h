@@ -40,12 +40,24 @@
 
 #define RADIO_MAX_VAPS 2
 
+/* Length of sun_path in a sockaddr_un, the longest --radio-socket path we take. */
+#define RADIO_SOCKET_PATH_MAX 108
+
 typedef struct {
     /* Interface that hostapd manages (usually a VAP of the NIC or the NIC
      * itself). LDN data and control frames are read/written here. */
     char ap_iface[IFNAMSIZ];
     /* Interface in monitor mode used to inject action frames. */
     char mon_iface[IFNAMSIZ];
+
+    /* Optional socket radio backend. When set, radio_open() binds a Unix
+     * datagram socket at this path and uses that one fd in place of both
+     * AF_PACKET sockets: a client on the other end of the socket plays the
+     * console - it injects frames with sendto() and reads everything the
+     * bridge transmits with recvfrom(). The bytes are exactly what the real
+     * NICs would have produced, so nothing above the radio layer cares which
+     * backend is live. No root and no wireless NIC, so CI can use it. */
+    char radio_socket[RADIO_SOCKET_PATH_MAX];
 
     uint8_t channel;
     uint8_t band;

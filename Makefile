@@ -16,7 +16,7 @@ TEST_OBJS := build/crypto.o build/ldn.o build/ryuldn.o build/room.o build/radio.
 # `make test` must still build it or those links fail from a clean tree.
 BRIDGE_OBJS := build/crypto.o build/ldn.o build/ryuldn.o build/room.o build/radio.o build/util.o build/host.o
 
-.PHONY: all clean check test interop
+.PHONY: all clean check test interop console-sim
 
 all: $(BIN)
 
@@ -31,6 +31,7 @@ $(OBJDIR):
 
 clean:
 	rm -rf $(OBJDIR) $(BIN) build/room_peer
+	rm -f /tmp/ldn-console.*
 
 # ---------------------------------------------------------------------------
 # Tests. All of them are socket-level and need no radio hardware.
@@ -60,6 +61,9 @@ test: $(TEST_OBJS) build/host.o
 	$(CC) $(CFLAGS) $(CPPFLAGS) -Isrc -o build/test_host_watchdog tests/test_host_watchdog.c \
 	    build/host.o $(TEST_OBJS) $(LDLIBS)
 	./build/test_host_watchdog
+	$(CC) $(CFLAGS) $(CPPFLAGS) -Isrc -Itests -o build/test_advert_hash tests/test_advert_hash.c \
+	    build/ldn.o build/crypto.o build/util.o $(LDLIBS)
+	./build/test_advert_hash
 
 # ---------------------------------------------------------------------------
 # CLI smoke test, also without radio hardware.
@@ -99,3 +103,24 @@ interop: build/bridge_harness build/room_peer tests/interop/prod.keys
 	  echo "--- Room peer ---"; ./build/room_peer; r2=$$?; \
 	  kill $$bp 2>/dev/null || true; wait $$bp 2>/dev/null || true; \
 	  if [ $$r1 -eq 0 ] && [ $$r2 -eq 0 ]; then exit 0; else exit 1; fi
+
+# ---------------------------------------------------------------------------
+# Fake-console simulation. Drives the REAL binary (not the harness, whose radio
+# is stubbed out) with --radio-socket, so the console -> bridge direction that
+# `make interop` structurally cannot cover actually runs: the guest creates a
+# network, and a fake console decrypts the advertisement, authenticates, and
+# sends Pia traffic. Needs no NIC and no root.
+# ---------------------------------------------------------------------------
+console-sim: $(BIN) tests/interop/prod.keys
+	@sock=/tmp/ldn-console.sock; rm -f $$sock $$sock.console; \
+	./$(BIN) --radio-socket $$sock --prodkeys tests/interop/prod.keys >build/console.log 2>&1 & bp=$$!; \
+	for i in $$(seq 1 50); do [ -S $$sock ] && break; sleep 0.1; done; \
+	[ -S $$sock ] || { echo "the bridge radio socket never appeared:"; cat build/console.log; exit 1; }; \
+	python3 tests/interop/ryu_peer.py --hold >build/console-ryu.log 2>&1 & rp=$$!; \
+	sleep 2; \
+	echo "--- fake console ---"; \
+	python3 tests/interop/fake_console.py --socket $$sock --title-id 01006F8002320000; rc=$$?; \
+	kill $$rp $$bp 2>/dev/null || true; wait $$rp $$bp 2>/dev/null || true; \
+	rm -f $$sock $$sock.console; \
+	exit $$rc
+

@@ -522,9 +522,18 @@ bool host_handle_frame(Host *host, Radio *radio, const RadioFrame *frame)
     if (frame->frame_len < sizeof(struct ethhdr)) {
         return false;
     }
-    uint16_t ethertype = rd_be16(frame->frame + 12);
 
-    if (ethertype == ETH_P_LDN && rd_be16(body + 3) == LDN_PACKET_AUTHENTICATION) {
+    /*
+     * NOTE: there is deliberately no ethertype check here.
+     *
+     * emit() hands us a frame with a synthesised 24-byte 802.11 header, so
+     * bytes 12..13 are part of addr2 (the sender's MAC), not an EtherType -
+     * comparing them against ETH_P_LDN could never match unless the console's
+     * MAC happened to contain 88:B7 at bytes 2-3, and no authentication request
+     * was ever recognised. The packet type lives in the vendor-specific body,
+     * exactly where ldn_parse_auth_frame() reads it.
+     */
+    if (rd_be16(body + 3) == LDN_PACKET_AUTHENTICATION) {
         /* --- LDN authentication request -------------------------- */
         LdnAuthData auth;
         memset(&auth, 0, sizeof(auth));

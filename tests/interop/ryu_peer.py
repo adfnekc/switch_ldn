@@ -74,4 +74,16 @@ for _ in range(4):
 try: recv_one()
 except: pass
 print("DONE")
+
+# Optionally hold the session open so a second peer (the fake console) has a
+# live LDN network to talk to. `make interop` relies on the default immediate
+# exit, so the socket is only closed in that case.
+import sys as _sys
+if "--hold" in _sys.argv[1:]:
+    print("holding the session open (Ctrl-C to end)")
+    try:
+        while True:
+            time.sleep(0.5)
+    except KeyboardInterrupt:
+        pass
 s.close()
