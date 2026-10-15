@@ -370,12 +370,18 @@ class FakeConsole:
         """A Pia game frame: 802.11 data frame carrying IPv4+UDP."""
         pia = self.passphrase[:16].ljust(16, b"\x00")
         udp = struct.pack(">HHHH", 40000, 30000, 8 + len(pia), 0) + pia
+        # A 20-byte IPv4 header, no options - the extra 4 bytes that used to
+        # follow here pushed the UDP header four bytes along, so the bridge read
+        # the length and checksum fields as the ports.
         ip = struct.pack(">BBHHHBBH", 0x45, 0, 20 + 8 + len(pia), 0, 0, 64, 17, 0)
-        ip += bytes.fromhex("0A720001") + bytes.fromhex("0A720002") + b"\x00" * 4
+        # Source is the LDN IP the bridge assigned us when we authenticated
+        # (169.254.x.y); destination is the LDN IP it published for the guest.
+        ip += bytes.fromhex("A9FE0301") + bytes.fromhex("0A720001")
         ip += udp
         self.sock.sendto(build_80211(self.mac, self.ap_mac, subtype_action=False) + ip,
                          self.path)
-        stage("Pia frame sent upstream as a data frame", True, f"{len(ip)}-byte IP packet")
+        stage("Pia frame sent upstream as a data frame", True,
+              "{}-byte IP packet".format(len(ip)))
 
     def handshake_socket(self):
         """

@@ -116,10 +116,13 @@ console-sim: $(BIN) tests/interop/prod.keys
 	./$(BIN) --radio-socket $$sock --prodkeys tests/interop/prod.keys >build/console.log 2>&1 & bp=$$!; \
 	for i in $$(seq 1 50); do [ -S $$sock ] && break; sleep 0.1; done; \
 	[ -S $$sock ] || { echo "the bridge radio socket never appeared:"; cat build/console.log; exit 1; }; \
-	python3 tests/interop/ryu_peer.py --hold >build/console-ryu.log 2>&1 & rp=$$!; \
+	python3 -u tests/interop/ryu_peer.py --hold --expect-proxy >build/console-ryu.log 2>&1 & rp=$$!; \
 	sleep 2; \
 	echo "--- fake console ---"; \
-	python3 tests/interop/fake_console.py --socket $$sock --title-id 01006F8002320000; rc=$$?; \
+	python3 -u tests/interop/fake_console.py --socket $$sock --title-id 01006F8002320000; rc=$$?; \
+	sleep 4; \
+	echo "--- the emulator side of that frame ---"; \
+	cat build/console-ryu.log | grep -E "ProxyData|\\[PASS\\]|\\[FAIL\\]" || true; \
 	kill $$rp $$bp 2>/dev/null || true; wait $$rp $$bp 2>/dev/null || true; \
 	rm -f $$sock $$sock.console; \
 	exit $$rc

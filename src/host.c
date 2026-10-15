@@ -572,16 +572,6 @@ bool host_handle_frame(Host *host, Radio *radio, const RadioFrame *frame)
          * advertisement. If it differs, the station heard a different
          * advertisement than the one we are serving now.
          */
-        if (getenv("LDN_DBG")) {
-            fprintf(stderr, "DBG ver=%u payload=%u status=%u isresp=%u si=",
-                    auth.version, auth.payload_size, auth.status_code, auth.is_response);
-            for (int i=0;i<16;i++) fprintf(stderr, "%02x", auth.session_info[i]);
-            fprintf(stderr, " user='%s' auth.sr=", auth.username);
-            for (int i=0;i<16;i++) fprintf(stderr, "%02x", auth.server_random[i]);
-            fprintf(stderr, " adv.sr=");
-            for (int i=0;i<16;i++) fprintf(stderr, "%02x", host->pub.adv_data.server_random[i]);
-            fprintf(stderr, "\n");
-        }
         if (memcmp(auth.server_random, host->pub.adv_data.server_random, 16) != 0) {
             LOG_W("station %02x:%02x:%02x:%02x:%02x:%02x rejected: server_random "
                   "does not match our current advertisement",
