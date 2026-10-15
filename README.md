@@ -153,6 +153,7 @@ unknown, and it is no longer a wire-format unknown.
 | Why consoles see a room but only some can join | [docs/ROOM_VISIBILITY.md](docs/ROOM_VISIBILITY.md) |
 | The Eden passphrase patch, and how to verify it | [docs/EDEN_PATCH.md](docs/EDEN_PATCH.md) |
 | Which emulator sources the interop tests use, and why | [docs/EMULATOR_SOURCES.md](docs/EMULATOR_SOURCES.md) |
+| Hardware bring-up, stage by stage | [docs/HARDWARE_CHECKLIST.md](docs/HARDWARE_CHECKLIST.md) |
 | The source-based interop peers | [tests/interop/README.md](tests/interop/README.md) |
 | Conventions for anyone (human or agent) working here | [AGENTS.md](AGENTS.md) |
 

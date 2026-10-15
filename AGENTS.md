@@ -16,6 +16,7 @@ Conventions for anyone (human or agent) working in this repo.
 | Why consoles see a room but only some can join | `docs/ROOM_VISIBILITY.md` |
 | The Eden passphrase patch | `docs/EDEN_PATCH.md` |
 | Which emulator sources the interop tests use | `docs/EMULATOR_SOURCES.md` |
+| Hardware bring-up, stage by stage | `docs/HARDWARE_CHECKLIST.md` |
 | The source-based interop peers | `tests/interop/README.md` |
 
 If a topic is described in more than one place, the table above decides. Do not
