@@ -893,24 +893,21 @@ static void radio_rx(const RadioFrame *frame, void *user)
 {
     Bridge *b = user;
 
-    if (frame->frame_len < sizeof(struct ethhdr)) {
+    /*
+     * radio.c's emit() normalises everything it receives into a frame with a
+     * *synthesised* 24-byte 802.11 header, so there is no EtherType to read:
+     * bytes 12..13 are part of addr2, the sender's MAC. Matching against them
+     * silently disabled both branches below - LDN control frames never reached
+     * the host FSM, so no console could ever authenticate, and Pia traffic
+     * never reached the emulator.
+     *
+     * So classify from the payload instead, via the same macro emit() and the
+     * rest of the stack use for "where the payload starts".
+     */
+    if (RADIO_PAYLOAD_LEN(frame) < 6) {
         return;
     }
-
-    /*
-     * Never read an EtherType out of frame->frame + 12.
-     *
-     * radio.c's emit() normalises everything it receives into a frame with a
-     * *synthesised* 24-byte 802.11 header, so +12..13 is part of addr2 - the
-     * sender's MAC - not an EtherType. Matching against it silently disabled
-     * both branches below: LDN control frames never reached the host FSM, so
-     * no console could ever authenticate, and Pia traffic never reached the
-     * emulator.
-     *
-     * LDN control frames are identified by their vendor-specific action
-     * header, the same marker ldn_parse_auth_frame() looks for.
-     */
-    const uint8_t *body = frame->frame + IEEE80211_HDRLEN;
+    const uint8_t *body = RADIO_PAYLOAD(frame);
 
     /*
      * Two LDN framings exist and they are NOT the same:
@@ -948,7 +945,7 @@ static void radio_rx(const RadioFrame *frame, void *user)
      * parse_udp() and build_udp_frame() already speak, which also keeps the
      * two directions symmetric.
      */
-    size_t payload_len = frame->frame_len - IEEE80211_HDRLEN;
+    size_t payload_len = RADIO_PAYLOAD_LEN(frame);
     uint8_t eth[14 + 2304];
     if (payload_len + 14 > sizeof(eth)) {
         LOG_E("radio->guest: %zu-byte payload does not fit, dropping it", payload_len);

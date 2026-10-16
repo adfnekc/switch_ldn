@@ -125,11 +125,18 @@ int main(void)
     memset(&rf, 0, sizeof(rf));
     memcpy(rf.dst_mac, host_mac, 6);
     memcpy(rf.src_mac, sta_mac, 6);
-    wr_be16(rf.frame + 12, ETH_P_LDN);
+    /*
+     * Only the payload matters: radio.c's emit() gives every frame a synthetic
+     * 24-byte MAC header, and host_handle_frame() identifies an LDN auth
+     * request by the vendor body at +24 - not by an EtherType. There used to be
+     * a `wr_be16(rf.frame + 12, ETH_P_LDN)` and a `payload_ethertype` field
+     * here, both written to satisfy a dispatch that read bytes 12..13 as an
+     * EtherType. Those bytes are addr2, so the old pairing was asserting the
+     * bug rather than the behaviour.
+     */
     memcpy(rf.frame + IEEE80211_HDRLEN, raw + IEEE80211_HDRLEN,
            (size_t)n - IEEE80211_HDRLEN);
     rf.frame_len = (size_t)n;
-    rf.payload_ethertype = ETH_P_LDN;
 
     expect("auth request is consumed", host_handle_frame(host, NULL, &rf));
 

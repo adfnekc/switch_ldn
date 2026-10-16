@@ -340,7 +340,6 @@ static void emit(Radio *r, const uint8_t *frame, size_t len)
             src_mac = frame + 6;
             payload = frame + sizeof(struct ethhdr);
             payload_len = len - sizeof(struct ethhdr);
-            f.payload_ethertype = etype;
             goto build;
         }
     }
@@ -351,7 +350,6 @@ static void emit(Radio *r, const uint8_t *frame, size_t len)
         src_mac = frame + 10;
         payload = frame + IEEE80211_HDRLEN;
         payload_len = len - IEEE80211_HDRLEN;
-        f.payload_ethertype = 0;
         goto build;
     }
 
@@ -369,9 +367,12 @@ build:
     memcpy(f.frame + IEEE80211_HDRLEN, payload, payload_len);
     f.frame_len = IEEE80211_HDRLEN + payload_len;
 
-    if (payload_len >= 6) {
-        f.packet_type = rd_be16(payload + 3);
-    }
+    /*
+     * No classification here. Both shapes are now "MAC header + payload", and
+     * what the payload *is* (an LDN vendor body or an IP packet) is decided
+     * once, in radio_rx(), from the payload bytes - not from an offset that
+     * happens to mean different things depending on how the frame arrived.
+     */
     r->rx_cb(&f, r->user);
 }
 

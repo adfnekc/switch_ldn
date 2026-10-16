@@ -82,14 +82,18 @@ typedef struct {
 typedef struct {
     uint8_t src_mac[6];
     uint8_t dst_mac[6];
-    uint16_t packet_type;
     uint8_t frame[2304];
     size_t frame_len;
-    uint16_t payload_ethertype; /* 0x88B7 for LDN control, 0x0800 for IP */
     uint64_t timestamp_ms;
 } RadioFrame;
 
-/* The payload starts right after the synthetic 24-byte MAC header. */
+/*
+ * The payload starts right after the synthetic 24-byte MAC header. Use these
+ * rather than open-coding the offset: emit() prepends that header to *both*
+ * input shapes, so "payload" means the same thing whatever the frame arrived
+ * as, and a hand-written offset is how the LDN dispatch ended up reading an
+ * EtherType out of the middle of addr2.
+ */
 #define RADIO_PAYLOAD(f) ((f)->frame + IEEE80211_HDRLEN)
 #define RADIO_PAYLOAD_LEN(f) ((f)->frame_len - IEEE80211_HDRLEN)
 

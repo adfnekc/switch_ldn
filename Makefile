@@ -2,6 +2,11 @@ CC      ?= gcc
 CFLAGS  ?= -O2 -g -std=gnu11 -Wall -Wextra -Wno-unused-parameter
 # OpenSSL 3 deprecates the low-level AES API; the EVP layer needs more plumbing for now.
 CFLAGS  += -Wno-deprecated-declarations
+# Track header dependencies. Without this, editing radio.h or ldn.h rebuilds
+# nothing: the old object files stay, the link still succeeds, and the result is
+# a binary mixing two struct layouts. That is how a change to RadioFrame
+# produced a bridge that ran but silently stopped dispatching console frames.
+CFLAGS  += -MMD -MP
 CPPFLAGS = -D_GNU_SOURCE
 LDLIBS   = -lcrypto -lzstd
 
@@ -28,6 +33,8 @@ $(OBJDIR)/%.o: $(SRCDIR)/%.c | $(OBJDIR)
 
 $(OBJDIR):
 	mkdir -p $(OBJDIR)
+
+-include $(OBJS:.o=.d)
 
 clean:
 	rm -rf $(OBJDIR) $(BIN) build/room_peer

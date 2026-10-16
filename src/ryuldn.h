@@ -283,7 +283,6 @@ void ryuldn_server_destroy(RyuLdnServer *server);
 /* Pump the server: accept new connections, read/write sessions. */
 void ryuldn_server_poll(RyuLdnServer *server, int timeout_ms);
 
-/* Drop a session. */
 /* ---------------------------------------------------------------- */
 /* Outgoing packets                                                 */
 /* ---------------------------------------------------------------- */
@@ -297,18 +296,32 @@ void ryuldn_send_initialize(RyuLdnSession *session, const uint8_t session_id[16]
 void ryuldn_send_proxy_config(RyuLdnSession *session, RyuLdnProxyConfig cfg);
 void ryuldn_send_sync_network(RyuLdnSession *session, const RyuLdnNetworkInfo *info);
 void ryuldn_send_connected(RyuLdnSession *session, const RyuLdnNetworkInfo *info);
-void ryuldn_send_sync_network(RyuLdnSession *session, const RyuLdnNetworkInfo *info);
-void ryuldn_send_scan_reply(RyuLdnSession *session, const RyuLdnNetworkInfo *info);
 void ryuldn_send_scan_reply_end(RyuLdnSession *session);
 void ryuldn_send_reject_reply(RyuLdnSession *session);
-void ryuldn_send_proxy_connect(RyuLdnSession *session, RyuLdnProxyInfo info);
 void ryuldn_send_proxy_connect_reply(RyuLdnSession *session, RyuLdnProxyInfo info);
 void ryuldn_send_proxy_data(RyuLdnSession *session, RyuLdnProxyInfo info,
                             const uint8_t *data, size_t len);
-void ryuldn_send_proxy_disconnect(RyuLdnSession *session, RyuLdnProxyInfo info,
-                                  int32_t reason);
 void ryuldn_send_network_error(RyuLdnSession *session, uint32_t error_code);
 void ryuldn_send_ping(RyuLdnSession *session, uint8_t requester, uint8_t id);
+
+/*
+ * Deliberately absent, because p0 never needs them and a declaration nothing
+ * defines is worse than no declaration at all - it advertises an API that fails
+ * only at link time, when the first person to use it has already written the
+ * caller:
+ *
+ *   ryuldn_send_scan_reply()      the bridge hosts; it has no *other* network to
+ *                                 report, so on_scan() sends only the end
+ *                                 marker. See on_scan() in main.c.
+ *   ryuldn_send_proxy_connect()   the bridge never initiates a proxy
+ *   ryuldn_send_proxy_disconnect()  connection: it relays the console's own
+ *                                 802.11 link, so there is no per-station proxy
+ *                                 connection to open or tear down. A station
+ *                                 leaving is told to the guest with
+ *                                 ryuldn_send_sync_network().
+ *
+ * Each is three lines over send_packet() if p1 ever needs it.
+ */
 
 /* ---------------------------------------------------------------- */
 /* Helpers                                                          */
