@@ -42,6 +42,13 @@ typedef struct {
     LdnSessionInfo session_info;
     LdnAdvertiseData adv_data;
     uint8_t adv_key[16];
+    /*
+     * Derived but currently unused: no LDN data frame is encrypted or
+     * decrypted anywhere in the bridge, and `keys_ready` is never read. Kept
+     * because real LDN derives it this way and whether a console encrypts the
+     * Pia path is unresolved - see open question 13 in DESIGN.md. Do not treat
+     * a populated data_key as evidence that any path uses it.
+     */
     uint8_t data_key[16];
     bool keys_ready;
     bool has_passphrase;

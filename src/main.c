@@ -86,8 +86,7 @@ static void warn_guest_gone(const char *what)
 
 static bool parse_udp(const uint8_t *eth, size_t len, const uint8_t **udp,
                       size_t *udp_len, uint16_t *sport, uint16_t *dport,
-                      uint32_t *src_ip, uint32_t *dst_ip)
-{
+                      uint32_t *src_ip, uint32_t *dst_ip){
     if (rd_be16(eth + 12) != 0x0800) {
         return false;
     }
@@ -120,6 +119,29 @@ static bool parse_udp(const uint8_t *eth, size_t len, const uint8_t **udp,
  * is using. RyuLdn takes it as ProxyData, the Room transport as an IdProxyPacket
  * - two encodings of the same thing, which is why they share the parse above.
  */
+/*
+ * A frame from a console that we could not turn into UDP is worth saying out
+ * loud, once every few seconds rather than per frame: if a real console ever
+ * wraps its Pia traffic in something we do not expect (an LDN-layer encryption,
+ * say), every single frame would otherwise be discarded without a trace and the
+ * symptom would be "the emulator sees nothing" with a completely clean log.
+ */
+static uint64_t g_unparsed_warned_at;
+
+static void warn_unparsed_console_frame(const uint8_t *eth, size_t len)
+{
+    uint64_t now = now_ms();
+    if (g_unparsed_warned_at && now - g_unparsed_warned_at < 5000) {
+        return;
+    }
+    g_unparsed_warned_at = now;
+    uint16_t etype = len >= 14 ? rd_be16(eth + 12) : 0;
+    unsigned proto = len >= 14 + 10 ? eth[14 + 9] : 0;
+    LOG_W("radio->guest: %zu-byte frame is not IPv4/UDP (ethertype %#06x, "
+          "ip proto %u); dropping it",
+          len, etype, proto);
+}
+
 static void deliver_to_guest(Bridge *b, const uint8_t *eth, size_t len)
 {
     const uint8_t *udp;
@@ -128,6 +150,7 @@ static void deliver_to_guest(Bridge *b, const uint8_t *eth, size_t len)
     uint32_t src_ip, dst_ip;
 
     if (!parse_udp(eth, len, &udp, &udp_len, &sport, &dport, &src_ip, &dst_ip)) {
+        warn_unparsed_console_frame(eth, len);
         return;
     }
 
