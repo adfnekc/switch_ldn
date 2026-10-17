@@ -731,7 +731,9 @@ static void handle_proxy_packet(RoomServer *server, MemberSlot *m, Packet *p,
     out->remote_port = rd_u16(p);
 
     out->protocol = rd_u8(p);
-    out->broadcast = rd_u8(p) != 0;
+    /* The broadcast byte must still be consumed to keep the layout aligned;
+     * it is deliberately not stored - see the note in room.h. */
+    (void)rd_u8(p);
 
     uint32_t n = rd_u32(p);
     if (!p->ok || n > p->len - p->pos) {
@@ -755,7 +757,8 @@ static void handle_ldn_packet(RoomServer *server, MemberSlot *m, Packet *p,
     out->ldn_packet_type = rd_u8(p);
     rd_raw(p, out->ldn_local_ip, 4);
     rd_raw(p, out->ldn_remote_ip, 4);
-    out->broadcast = rd_u8(p) != 0;
+    /* broadcast byte: consumed, not stored - see the note in room.h. */
+    (void)rd_u8(p);
 
     uint32_t n = rd_u32(p);
     if (!p->ok || n > p->len - p->pos) {

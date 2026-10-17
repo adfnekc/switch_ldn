@@ -135,7 +135,6 @@ static int host_configure(Host *host, uint64_t title_id, uint16_t channel,
     host->pub.band = band;
     host->pub.security_level = LDN_SECURITY_LEVEL_BOTH_ENCRYPTED;
     host->pub.host_ip_octet_x = 1;
-    host->pub.has_passphrase = passphrase_len > 0;
     host->pub.keys_ready = false;
 
     LdnAdvertiseData *ad = &host->pub.adv_data;

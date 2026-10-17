@@ -51,7 +51,6 @@ typedef struct {
      */
     uint8_t data_key[16];
     bool keys_ready;
-    bool has_passphrase;
 
     uint8_t nonce[LDN_NONCE_SIZE];
     uint8_t security_level;

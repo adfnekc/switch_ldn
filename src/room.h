@@ -125,7 +125,13 @@ typedef struct {
     uint8_t local_family, remote_family, protocol;
     uint8_t local_ip[4], remote_ip[4];
     uint16_t local_port, remote_port;
-    bool broadcast;
+    /*
+     * The wire carries a broadcast byte here, but it is not decoded: Eden sets
+     * it as `broadcast && remote_endpoint.ip[3] == 255`
+     * (socket_proxy.cpp, ProxySocket::SendTo), so remote_ip[3] alone already
+     * carries the same information and the relay reads that instead. One
+     * source of truth rather than two that can disagree.
+     */
     /* IdLdnPacket */
     uint8_t ldn_packet_type;
     uint8_t ldn_local_ip[4], ldn_remote_ip[4];

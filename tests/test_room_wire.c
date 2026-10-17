@@ -36,6 +36,16 @@ static size_t walk_str(const uint8_t *buf, size_t total, size_t *off)
 
 static uint32_t g_joins = 0;
 static uint32_t g_packets = 0;
+/*
+ * Decoded IdProxyPacket fields. The ports are the assertion that matters: the
+ * layout is endpoint(4 fields) + protocol + broadcast + vector, so if the
+ * broadcast byte is not consumed, everything after it shifts and these read
+ * whatever follows instead. Asserting only "a packet arrived" would not notice.
+ */
+static uint16_t g_proxy_local_port;
+static uint16_t g_proxy_remote_port;
+static uint8_t g_proxy_protocol;
+static uint32_t g_proxy_data_len;
 static uint8_t g_first_fake_ip[4] = {0xFF, 0xFF, 0xFF, 0xFF};
 
 /* Decoded IdSetGameInfo, for verifying the u64 title id byte order. */
@@ -76,6 +86,11 @@ static void on_packet(RoomServer *server, int member_id, const RoomPacketIn *pkt
         g_game_id = pkt->game_id;
         snprintf(g_game_name, sizeof(g_game_name), "%s", pkt->game_name);
         snprintf(g_game_version, sizeof(g_game_version), "%s", pkt->game_version);
+    } else if (pkt->type == IdProxyPacket) {
+        g_proxy_local_port = pkt->local_port;
+        g_proxy_remote_port = pkt->remote_port;
+        g_proxy_protocol = pkt->protocol;
+        g_proxy_data_len = pkt->data_len;
     } else if (pkt->type == IdLdnPacket) {
         g_scan_decoded = true;
         g_scan_type = pkt->ldn_packet_type;
@@ -358,7 +373,12 @@ int main(void)
         usleep(3 * 1000);
     }
     assert(g_packets == before + 1);
-    printf("IdProxyPacket decoded (%zu bytes, payload 'PIA!')\n", proxy_len);
+    assert(g_proxy_local_port == 1234);
+    assert(g_proxy_remote_port == 0);
+    assert(g_proxy_protocol == 17);
+    assert(g_proxy_data_len == 4);
+    printf("IdProxyPacket decoded (%zu bytes, local_port=%u proto=%u data=%u)\n",
+           proxy_len, g_proxy_local_port, g_proxy_protocol, g_proxy_data_len);
 
     /* ================================================================ */
     /* IdRoomInformation: our encoder must produce a walkable packet      */
