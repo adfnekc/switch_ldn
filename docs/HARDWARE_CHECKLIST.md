@@ -65,6 +65,30 @@ All five must pass. `make test` and `make interop` deliberately stub out the
 radio, so a green stage 0 tells you nothing about the NIC. It only means a later
 failure is the radio, not this code.
 
+## Stage 0.5 — make the interface exist at all
+
+The checklist used to assume a `wlanX` was already there. It often is not, and
+the failure is quiet: `modprobe` reports success, no interface appears, and
+nothing on the console says why. Always check `dmesg` at this point.
+
+```bash
+sudo modprobe rtw88_8812au        # mainline; claims usb:v0BDAp8812
+ip -brief link                   # is there a wlanX now?
+dmesg | tail -20                 # the only place the reason shows up
+```
+
+**The two failure modes seen in practice:**
+
+| `dmesg` says | Meaning | Fix |
+|---|---|---|
+| `failed to load firmware` / `failed to setup chip efuse info` / `probe with driver rtw88_8812au failed with error -22` | the module loaded, but `/lib/firmware/rtw88/rtw8812a_fw.bin` is missing, so the probe fails and no netdev is created. `modprobe` itself returned success. | `sudo apt install linux-firmware-realtek`, then reload the module (`sudo modprobe -r rtw88_8812au && sudo modprobe rtw88_8812au`). Note that on Ubuntu `linux-firmware` alone is a 1.8 KB metapackage — the Realtek blobs are in `linux-firmware-realtek` (6 MB). |
+| nothing about the adapter at all | the USB interface is present but no driver claimed it | `cat /sys/bus/usb/devices/*/uevent \| grep MODALIAS` and compare against `modinfo -F alias` for the driver you expect. `0bda:8812` is claimed by both `rtw88_8812au` (mainline) and the out-of-tree aircrack-ng driver; the two conflict, so only have one available. |
+
+Which driver to aim for: try mainline `rtw88_8812au` first — it is already built
+on most kernels, so it costs only a `modprobe`. The aircrack-ng out-of-tree
+driver is the fallback when `rtw88`'s monitor/injection is not good enough, and
+the checklist below assumes it.
+
 ## Stage 1 — probe the NIC
 
 ```bash
@@ -81,7 +105,11 @@ architecture is even possible.
 | `iw dev` listing, `iw dev wlan0 info` mode + channel | the card is up |
 | a `channels` list containing the channel you asked for | regulatory domain is not blocking it |
 | `monitor VIF: OK` | **the whole two-interface design works** |
-| `selfcheck wlan0 mode=...` / `freq=...` / `ifindex=N` from `switch_ldn` | the bridge can talk to the interface |
+| `selfcheck wlan0 mode=managed (2)` / `freq=...` / `ifindex=N` from `switch_ldn` | the bridge can talk to the interface |
+
+`switch_ldn --selfcheck` exits nonzero for an interface that does not exist or
+has no wireless extensions, so a script can branch on it instead of reading the
+log.
 
 **Failure → what it means:**
 
