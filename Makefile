@@ -77,8 +77,12 @@ test: $(TEST_OBJS) build/host.o
 # ---------------------------------------------------------------------------
 check: $(BIN)
 	./$(BIN) --help
-	@echo "--- selfcheck on loopback (expected: unknown mode) ---"
+	@echo "--- selfcheck on loopback (expected: no wireless extensions) ---"
 	./$(BIN) --selfcheck lo || true
+	@echo "--- selfcheck must FAIL for an interface that is not there ---"
+	@if ./$(BIN) --selfcheck __no_such_iface >/dev/null 2>&1; then \
+	    echo "ERROR: selfcheck on a missing interface exited 0"; exit 1; \
+	else echo "correctly nonzero"; fi
 	@echo "--- live mode must refuse to start without --ap-iface ---"
 	@if ./$(BIN) --prodkeys /dev/null >/dev/null 2>&1; then \
 	    echo "ERROR: should have failed"; exit 1; \

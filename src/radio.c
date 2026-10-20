@@ -176,9 +176,24 @@ int radio_selfcheck(const char *iface)
         close(fd);
     }
 
-    /* VIF support is what decides the whole architecture. */
+    /*
+     * VIF support is what decides the whole architecture, and an interface that
+     * does not exist is a hard failure: reporting "mode=unknown" and exiting 0
+     * let setup-ap.sh carry on as though the probe had passed, which is exactly
+     * the kind of silent success this project keeps removing.
+     */
     int idx = iface_index(iface);
     LOG_I("selfcheck %-16s ifindex=%d", iface, idx);
+    if (idx < 0) {
+        LOG_E("selfcheck %s: no such interface", iface);
+        return -1;
+    }
+    if (mode < 0) {
+        LOG_E("selfcheck %s: the kernel has no wireless extensions for it; "
+              "if this is a USB adapter, is its driver bound?",
+              iface);
+        return -1;
+    }
     return mode;
 }
 

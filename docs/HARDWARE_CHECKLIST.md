@@ -7,13 +7,53 @@ these failures are quiet.
 
 Prerequisites, all of which you must have before stage 1:
 
-- a `RTL8812AU` on the aircrack-ng out-of-tree driver
+- **a real Linux machine, not WSL2, not a container.** See the box below; this
+  is the first thing to rule out because everything else is wasted effort if it
+  fails.
+- a `RTL8812AU`. The aircrack-ng out-of-tree driver is what this checklist
+  assumes; the mainline `rtw88_8812au` module may be enough and is worth trying
+  first (see below).
 - root on the same machine
 - a real Switch **with local wireless play** in a supported game
 - `prod.keys` from that same console (the bridge needs `--prodkeys`; nothing
   else about the console is required, and it does not need to be modified)
 - the emulator, Ryubing first — it needs no patch and exercises the RyuLdn
   path that has the least moving parts
+
+### Rule out WSL2 / a container first
+
+A USB adapter passed through to WSL2 **does** show up in `lsusb`, and that is as
+far as it goes:
+
+```console
+$ lsusb | grep 8812
+Bus 001 Device 002: ID 0bda:8812 Realtek ... RTL8812AU
+$ ip -brief link
+lo  UNKNOWN
+eth0 UP            # no wlan at all
+$ cat /sys/bus/usb/devices/1-1:1.0/uevent | grep MODALIAS
+MODALIAS=usb:v0BDAp8812d0000d...   # correct, but nothing is bound to it
+```
+
+`/sys/bus/usb/devices/1-1:1.0/driver` does not exist, so no driver owns the
+interface. Two things then block you:
+
+1. **The out-of-tree driver cannot be built.** WSL2's headers package ships only
+   `include/`: `/lib/modules/$(uname -r)/build` has no `Makefile`, no
+   `Module.symvers` and no `scripts/`, all of which an out-of-tree module build
+   needs.
+2. **`iw`/`hostapd`/`rfkill` are usually absent**, and installing them needs
+   root you may not have.
+
+If the kernel already ships a driver for your chip, `modprobe` may be enough —
+`rtw88_8812au` is in mainline and claims `usb:v0BDAp8812`, so check
+`modinfo -F alias` against `/sys/.../uevent`'s `MODALIAS` before assuming you
+need the out-of-tree one. But monitor-mode *injection* from WSL2 is unproven,
+and WSL2's networking is NATed, so treat WSL2 as a dead end for stage 4
+regardless: it will cost time and cannot answer the question.
+
+`make console-sim` needs none of this and still works under WSL2 — it is the
+one hardware-adjacent thing that does.
 
 ## Stage 0 — software sanity (no hardware needed)
 

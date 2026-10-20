@@ -1057,8 +1057,8 @@ int main(int argc, char **argv)
 
     /* ---------------- selfcheck mode ---------------- */
     if (selfcheck_iface) {
-        radio_selfcheck(selfcheck_iface);
-        return 0;
+        /* Nonzero when the probe fails, so a script can branch on it. */
+        return radio_selfcheck(selfcheck_iface) < 0 ? 1 : 0;
     }
 
     /* ---------------- prod.keys ---------------- */
