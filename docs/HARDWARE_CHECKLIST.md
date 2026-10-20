@@ -66,6 +66,49 @@ Linux kernel with the USB device passed through.
 `make console-sim` needs none of this and still works under WSL2 — it is the one
 hardware-adjacent thing that does.
 
+### If it is WSL2: hand the adapter to a real VM
+
+The cheapest way out of the firmware problem above is not a custom WSL2 kernel -
+it is to let a guest that boots its own Linux kernel own the USB device. There,
+`kthreadd`'s root is the real root, `request_firmware()` finds
+`/lib/firmware/...` on the first try, and none of this section applies.
+
+Use **VirtualBox** (with the Extension Pack, needed for USB 2.0+) or **VMware
+Workstation**. **Do not use Hyper-V** - its USB "passthrough" is USB/IP again,
+which is the arrangement that just failed.
+
+1. Install a normal distro in the VM (Ubuntu 24.04 is fine). It must boot
+   **systemd**, because udev is what serves firmware to the kernel on the
+   fallback path.
+2. VM settings -> USB -> enable the controller (try **xHCI / USB 3.0** first;
+   EHCI passthrough is the flakier of the two) and add a filter for
+   `0bda:8812` so the adapter attaches whenever it is plugged in.
+3. Boot the guest and confirm the device is the guest's, not Windows':
+
+   ```console
+   $ lsusb | grep 8812
+   Bus 001 Device 003: ID 0bda:8812 Realtek ... RTL8812AU
+   $ sudo modprobe rtw88_8812au && ip -brief link
+   ... wlan0 ...
+   ```
+
+   If no `wlan0` appears, `dmesg | grep -i rtw88` - and check the firmware is
+   actually present and *uncompressed* (`ls /lib/firmware/rtw88/rtw8812a_fw.bin`).
+   Ubuntu ships those as `.zst`; a distro kernel with
+   `CONFIG_FW_LOADER_COMPRESS_ZSTD=y` handles that on its own, and if yours does
+   not, `sudo zstd -d .../rtw8812a_fw.bin.zst -o .../rtw8812a_fw.bin` fixes it.
+4. Then continue at **Stage 1** below.
+
+Notes:
+
+- WSL2 and VirtualBox/VMware can coexist, but WSL2 keeps the Windows hypervisor
+  loaded, which pushes the VM onto a slower API and occasionally breaks USB
+  passthrough. `wsl --shutdown` before starting the VM if the device will not
+  attach.
+- A VM's USB passthrough is much closer to bare metal than USB/IP, so the
+  timing-sensitive part (stage 4's 100 ms injection, stage 5's 700 ms auth
+  window) is answered more honestly here than it would be under WSL2.
+
 ## Stage 0 — software sanity (no hardware needed)
 
 ```bash
