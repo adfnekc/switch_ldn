@@ -20,40 +20,51 @@ Prerequisites, all of which you must have before stage 1:
 - the emulator, Ryubing first — it needs no patch and exercises the RyuLdn
   path that has the least moving parts
 
-### Rule out WSL2 / a container first
-
-A USB adapter passed through to WSL2 **does** show up in `lsusb`, and that is as
-far as it goes:
+### Rule out WSL2 / a container first — one command
 
 ```console
-$ lsusb | grep 8812
-Bus 001 Device 002: ID 0bda:8812 Realtek ... RTL8812AU
-$ ip -brief link
-lo  UNKNOWN
-eth0 UP            # no wlan at all
-$ cat /sys/bus/usb/devices/1-1:1.0/uevent | grep MODALIAS
-MODALIAS=usb:v0BDAp8812d0000d...   # correct, but nothing is bound to it
+$ dmesg | grep 'Direct firmware load'
+[   100005.973177] faux_driver regulatory: Direct firmware load for regulatory.db failed with error -2
 ```
 
-`/sys/bus/usb/devices/1-1:1.0/driver` does not exist, so no driver owns the
-interface. Two things then block you:
+If that prints **anything**, stop: the kernel cannot read `/lib/firmware` in
+this environment, and no Wi-Fi driver can work. Confirm by checking that the
+file it complains about is actually on disk:
 
-1. **The out-of-tree driver cannot be built.** WSL2's headers package ships only
-   `include/`: `/lib/modules/$(uname -r)/build` has no `Makefile`, no
-   `Module.symvers` and no `scripts/`, all of which an out-of-tree module build
-   needs.
-2. **`iw`/`hostapd`/`rfkill` are usually absent**, and installing them needs
-   root you may not have.
+```console
+$ ls -l /lib/firmware/regulatory.db
+-rw-r--r-- 1 root root 6380 ... /lib/firmware/regulatory.db
+```
 
-If the kernel already ships a driver for your chip, `modprobe` may be enough —
-`rtw88_8812au` is in mainline and claims `usb:v0BDAp8812`, so check
-`modinfo -F alias` against `/sys/.../uevent`'s `MODALIAS` before assuming you
-need the out-of-tree one. But monitor-mode *injection* from WSL2 is unproven,
-and WSL2's networking is NATed, so treat WSL2 as a dead end for stage 4
-regardless: it will cost time and cannot answer the question.
+The file is there and the kernel says ENOENT anyway. That is the whole test, and
+it is worth running before anything else, because every symptom downstream
+("modprobe printed nothing", "no wlanX", "device visible but no driver") is a
+consequence of it and none of them point at the cause.
 
-`make console-sim` needs none of this and still works under WSL2 — it is the
-one hardware-adjacent thing that does.
+Why it happens: `request_firmware()` runs on a workqueue thread, which resolves
+paths against the mount namespace of the *init* process rather than the
+distro's. Under WSL2 the distro root is mounted after the kernel starts, so the
+thread's view does not contain `/lib/firmware`. The usual escape hatch is the
+userspace helper, and both halves of it are missing here:
+
+- `CONFIG_FW_LOADER_USER_HELPER_FALLBACK` is not set, so `/sys/module/firmware_class/parameters/`
+  contains only `path` - there is no `fallback` knob to turn on;
+- and no udev is running (`/run/udev/control` absent, PID 1 is `init(Ubuntu)`),
+  so nothing could answer the request even if it were made.
+
+This is why the RTL8812AU gets so close and stops: `rtw88_8812au` loads, binds,
+request the firmware, gets ENOENT, and unwinds with `probe ... failed with
+error -22`. The `.zst` firmware that Ubuntu ships makes it look worse -
+`CONFIG_FW_LOADER_COMPRESS_ZSTD` is absent from the WSL2 kernel too, so only
+`.xz` would have been decompressed - but decompressing it by hand does not help
+either, because of the namespace problem above.
+
+A real Linux machine has `kthreadd`'s root equal to the real root, so the same
+`modprobe` just works. That is the fix: bare metal, or a VM that boots its own
+Linux kernel with the USB device passed through.
+
+`make console-sim` needs none of this and still works under WSL2 — it is the one
+hardware-adjacent thing that does.
 
 ## Stage 0 — software sanity (no hardware needed)
 
