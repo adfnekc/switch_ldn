@@ -92,13 +92,20 @@ check: $(BIN)
 	@echo "--- prod.keys is found in the default location, no flag needed ---"
 	@h=$$(mktemp -d); mkdir -p $$h/.config/switch_ldn; \
 	cp tests/interop/prod.keys $$h/.config/switch_ldn/prod.keys; \
-	if HOME=$$h timeout 3 ./$(BIN) --radio-socket /tmp/check-keys.sock 2>&1 \
+	if XDG_CONFIG_HOME= HOME=$$h timeout 3 ./$(BIN) --radio-socket /tmp/check-keys.sock 2>&1 \
 	    | grep -q "using prod.keys from $$h/.config/switch_ldn/prod.keys"; then \
 	    echo "found it"; else echo "ERROR: default lookup did not find prod.keys"; rm -rf $$h /tmp/check-keys.sock; exit 1; fi; \
 	rm -rf $$h /tmp/check-keys.sock*
+	@echo "--- XDG_CONFIG_HOME takes precedence over HOME, as XDG says it must ---"
+	@h=$$(mktemp -d); mkdir -p $$h/.config/switch_ldn $$h/xdg/switch_ldn; \
+	cp tests/interop/prod.keys $$h/xdg/switch_ldn/prod.keys; \
+	if XDG_CONFIG_HOME=$$h/xdg HOME=$$h timeout 3 ./$(BIN) --radio-socket /tmp/check-xdg.sock 2>&1 \
+	    | grep -q "using prod.keys from $$h/xdg/switch_ldn/prod.keys"; then \
+	    echo "XDG won"; else echo "ERROR: XDG_CONFIG_HOME was ignored"; rm -rf $$h /tmp/check-xdg.sock; exit 1; fi; \
+	rm -rf $$h /tmp/check-xdg.sock*
 	@echo "--- a missing prod.keys must name the paths it tried ---"
 	@h=$$(mktemp -d); \
-	if HOME=$$h ./$(BIN) --radio-socket /tmp/check-nokeys.sock >$$h/out 2>&1; then \
+	if XDG_CONFIG_HOME= HOME=$$h ./$(BIN) --radio-socket /tmp/check-nokeys.sock >$$h/out 2>&1; then \
 	    echo "ERROR: started without any prod.keys"; rm -rf $$h; exit 1; \
 	fi; \
 	for p in prod.keys .config/switch_ldn/prod.keys .switch/prod.keys; do \
