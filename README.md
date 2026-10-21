@@ -127,7 +127,7 @@ sudo IFACE=wlan0 CHANNEL=1 scripts/setup-ap.sh selfcheck   # probe the NIC
 sudo IFACE=wlan0 CHANNEL=1 scripts/setup-ap.sh up
 hostapd config/ldn-ap.conf &
 
-sudo ./switch_ldn --ap-iface wlan0_ap --mon-iface wlan0_mon \
+sudo ./switch_ldn --ap-iface wlan0 \
     --channel 1 --prodkeys prod.keys
 ```
 

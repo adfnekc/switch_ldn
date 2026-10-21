@@ -200,16 +200,16 @@ the checklist below assumes it.
 sudo IFACE=wlan0 CHANNEL=1 scripts/setup-ap.sh selfcheck
 ```
 
-This answers the three hardware risks in one command and decides which
-architecture is even possible.
+Read-only: it creates no interfaces, because on this driver that is the
+operation that hangs the machine.
 
 **What you should see, in order:**
 
 | Output | Meaning |
 |---|---|
 | `iw dev` listing, `iw dev wlan0 info` mode + channel | the card is up |
+| `AP: supported` and `monitor: supported` | the driver advertises both; only AP is needed now |
 | a `channels` list containing the channel you asked for | regulatory domain is not blocking it |
-| `monitor VIF: OK` | **the whole two-interface design works** |
 | `selfcheck wlan0 mode=managed (2)` / `freq=...` / `ifindex=N` from `switch_ldn` | the bridge can talk to the interface |
 
 `switch_ldn --selfcheck` exits nonzero for an interface that does not exist or
@@ -220,13 +220,13 @@ log.
 
 | Symptom | Meaning | What to do |
 |---|---|---|
-| `monitor VIF: UNSUPPORTED` | the 8812AU driver cannot make a monitor VIF (aircrack-ng/rtl8812au #93, #376) | fall back to §3b in `DESIGN.md`: one monitor interface plus a userspace 802.11 MAC FSM. Do not continue past stage 2. |
+| `monitor: NOT supported` | the driver cannot do monitor at all | does not matter: the bridge injects through nl80211 `.mgmt_tx` on the AP interface, and never needs a monitor interface. |
+| `AP: NOT supported` | this chip/driver cannot host | stop; the bridge is the LDN host, so this is fatal. |
 | `NO CARRIER`, or no channels listed | the card is held by NetworkManager or rfkill | the script already stops NetworkManager and unblocks rfkill; check `rfkill list` |
 | only 5 GHz channels listed with `country_code=US` | regulatory domain too restrictive for the channels LDN uses | `iw reg set US` is already tried; try a country code whose domain covers the channel |
 
-A card that gets past `monitor VIF: OK` is viable. A card that fails it is not
-worth debugging further on this bridge — `mt7610u`/`mt7612u`/`mt7921au` have
-driver-native support and are strongly preferred.
+A card that reports `AP: supported` is viable. Nothing here needs a monitor
+interface, and on the RTL8812AU it is not available in practice.
 
 ## Stage 2 — bring up the interfaces and hostapd
 
@@ -237,33 +237,41 @@ $EDITOR /etc/hostapd/ldn-ap.conf     # set interface= and channel=
 hostapd /etc/hostapd/ldn-ap.conf &
 ```
 
-`interface=` must match the AP VIF the script created (default `wlan0_ap`), and
-`channel=` must match `--channel` you will pass to the bridge and the VIFs.
+`interface=` must be the same interface you will pass to the bridge as
+`--ap-iface` (the physical one, `wlan0` or `wlx...`), and `channel=` must match
+`--channel`. There is no separate monitor interface any more: the script does
+not create VIFs, because creating a monitor one wedges this driver.
 
 **Verify before starting the bridge:**
 
 ```bash
-iw dev                                    # wlan0_ap (type AP) and wlan0_mon (type monitor)
-ip link show wlan0_ap                     # state UP
+iw dev                                    # that interface, type AP
+ip link show wlan0                        # state UP
 hostapd_cli status # or the hostapd log   # AP-ENABLED
 ```
 
-If `wlan0_ap` is DOWN or hostapd never reaches `AP-ENABLED`, stop here — a bridge
-started against a dead AP will log radio errors for every frame.
+If the interface is DOWN or hostapd never reaches `AP-ENABLED`, stop here — a
+bridge started against a dead AP will log radio errors for every frame.
 
 ## Stage 3 — start the bridge, emulator only
 
 With **no** console involved yet:
 
 ```bash
-sudo ./switch_ldn --ap-iface wlan0_ap --mon-iface wlan0_mon \
+sudo ./switch_ldn --ap-iface wlan0 \
     --channel 1 --prodkeys prod.keys
 ```
 
 **Expected log, in order:**
 
-1. `AP MAC 02:4a:57:53:44:01` — read off the AP VIF. Note it: a colliding BSSID
-   is the one thing this reveals.
+1. `AP MAC <mac>` — read off the interface. It must be the BSSID hostapd is
+   using: `ldn-ap.conf` deliberately sets no `bssid=`, so both come from the
+   interface. A mismatch means the advertisement and the beacon come from
+   different addresses.
+   With no monitor interface you also get
+   `nl80211: management frames enabled on <if>` and
+   `nl80211: subscribed to action frames 00:22:aa/4`, which are what make the
+   advertisements possible at all.
 2. `bridge running: RyuLdn on 127.0.0.1:30456, Room on 127.0.0.1:24872, ...`
 3. Nothing else. **No** advertisement yet — the LDN host only exists once the
    emulator's game creates a network.
@@ -348,26 +356,26 @@ the driver labels the frame `P2P_NOTICE_OF_ABSENCE`: it recognises the
 vendor-specific category 127 and the `00:22:aa` OUI as P2P, which is the same
 OUI LDN uses. The label is cosmetic; the bytes go out unchanged.
 
-## Stage 4 — action-frame injection, before any console
+## Stage 4 — proving injection without a console
 
-This is the first genuinely unvalidated step, and it is worth proving alone:
-
-watch the log at debug level while the emulator hosts a network, and confirm the
-advertisements are actually going out:
+There is no monitor interface to sniff, so verify from the driver instead. Start
+hostapd, start the bridge with `--ap-iface` and no `--mon-iface`, make the
+emulator create a network, then:
 
 ```bash
-sudo ./switch_ldn --ap-iface wlan0_ap --mon-iface wlan0_mon \
-    --channel 1 --prodkeys prod.keys -v
+grep -c "mgmt_tx rejected" <bridge log>      # must be 0
+dmesg | grep -c RTW_Tx                        # must climb, ~2 lines per frame
+dmesg | grep RTW_Tx | tail -2
 ```
 
-You want to see the advertisement cadence. Cross-check on the air with
-`airodump-ng wlan0_mon` — an LDN action frame appears as a vendor-specific
-action frame on the channel. **If nothing goes out, nothing downstream can
-work**, and this is the first thing to fix.
+Two log lines per advertisement every ~100 ms is the pass condition. If
+`mgmt_tx rejected` appears, the errno says which layer refused: `-EINVAL` is
+almost always a malformed frame or an incomplete channel descriptor (both have
+happened here - see the endianness and chandef notes above), and `-ENOTCONN`
+means the interface is not in AP mode.
 
-A second, independent check that needs no console: `tcpdump -i wlan0_mon -e`
-should show the frames. If `-i wlan0_mon` only (and not `-i wlan0_ap`) shows
-them, injection is working and the split is correct.
+**If nothing goes out, nothing downstream can work**, so settle this before
+suspecting the console.
 
 ## Stage 5 — the console joins
 

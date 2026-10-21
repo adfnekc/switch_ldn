@@ -1,37 +1,32 @@
-#!/usr/bin/env bash
+#!/bin/sh
 #
 # Bring up the 802.11 side of the bridge.
 #
-# Layout we are aiming for:
+#     $IFACE  ->  hostapd-managed AP (hidden SSID, open auth, no WPA)
 #
-#     wlan0  -> hostapd-managed AP (hidden SSID, open auth, no WPA)
-#               bridges 802.11 stations into the Linux bridge, so LDN control
-#               frames and Pia traffic arrive on an AF_PACKET socket as
-#               normal Ethernet frames.
+# One interface is all this needs. The AP interface carries the LDN control and
+# Pia traffic as Ethernet (hostapd bridges it), and the advertisements go out
+# through nl80211 .mgmt_tx on that same interface - see src/nl80211.h.
 #
-#     wlan0  -> monitor VIF on the same radio, used only to inject the
-#               100 ms LDN vendor-specific action frames.
+# A SECOND VIRTUAL INTERFACE IS NOT CREATED, ON PURPOSE.
 #
-#    hostapd is *not* modified. The reason we cannot use hostapd alone is that
-#    it cannot emit a periodic vendor-specific action frame.
+# The original design used an AP VIF plus a monitor VIF for injecting action
+# frames. On the RTL8812AU, creating a monitor VIF does not fail: it wedges the
+# kernel (ping keeps answering, ssh never gets a banner), measured three times
+# on Debian 13 / kernel 6.12 / aircrack-ng v5.13.6, including with the base
+# interface down. That is aircrack-ng/rtl8812au #93 and #376. So this script
+# never asks the driver for one, and neither does selfcheck.
 #
-# NOTE ON THE RTL8812AU: the aircrack-ng out-of-tree driver is the only one
-# with reliable monitor mode + injection on this chip, but its VIF support is
-# fragile (aircrack-ng/rtl8812au#93, #376). If the `iw add` below fails, the
-# alternatives are (a) patch hostapd to inject the action frame itself, or
-# (b) drop hostapd and implement the 802.11 MAC FSM in userspace on a single
-# monitor interface (more work, but only one VIF - see DESIGN.md §3b).
+# hostapd is *not* modified. It cannot emit a periodic vendor-specific action
+# frame, which is why the bridge injects that itself.
 
-set -euo pipefail
+set -eu
 
 IFACE="${IFACE:-wlan0}"
-AP_IFACE="${AP_IFACE:-wlan0_ap}"
-MON_IFACE="${MON_IFACE:-wlan0_mon}"
 CHANNEL="${CHANNEL:-1}"
-BAND="${BAND:-2}"
 COUNTRY="${COUNTRY:-US}"
 
-if [[ $EUID -ne 0 ]]; then
+if [ "$(id -u)" -ne 0 ]; then
     echo "must run as root (raw 802.11 needs CAP_NET_ADMIN)" >&2
     exit 1
 fi
@@ -40,55 +35,67 @@ cmd="${1:-up}"
 
 case "$cmd" in
 up)
-    # The 8812AU driver refuses injection while NetworkManager holds the card.
+    # NetworkManager and rfkill both hold the card away from hostapd.
     systemctl stop NetworkManager 2>/dev/null || service network-manager stop 2>/dev/null || true
-    rfkill unblock all || true
+    rfkill unblock all 2>/dev/null || true
 
-    # No regulatory enforcement: LDN needs channels the driver would otherwise reject.
-    iw reg set "$COUNTRY" || true
+    # No regulatory enforcement: LDN needs channels the driver would otherwise
+    # reject with the default domain.
+    iw reg set "$COUNTRY" 2>/dev/null || true
 
+    # Down here, up by hostapd: it owns mode, channel and beaconing.
     ip link set "$IFACE" down
+    ip link set "$IFACE" up
 
-    # --- hostapd interface -------------------------------------------------
-    # Hidden network, open authentication. hostapd will still emit its own
-    # beacons (with a normal SSID) which the Switches ignore - they scan for
-    # the LDN action frame, not the beacon.
-    iw dev "$IFACE" interface add "$AP_IFACE" type __ap || true
-    iw dev "$AP_IFACE" set channel "$CHANNEL" 2>/dev/null || \
-        iw dev "$AP_IFACE" set freq "$(( 2407 + 5 * (CHANNEL - 1) ))"
-    ip link set "$AP_IFACE" up
-
-    # --- monitor interface --------------------------------------------------
-    iw dev "$IFACE" interface add "$MON_IFACE" type monitor || true
-    iw dev "$MON_IFACE" set channel "$CHANNEL" 2>/dev/null || \
-        iw dev "$MON_IFACE" set freq "$(( 2407 + 5 * (CHANNEL - 1) ))"
-    ip link set "$MON_IFACE" up
-
-    echo "AP iface:    $AP_IFACE"
-    echo "Monitor if:  $MON_IFACE"
+    echo "interface: $IFACE (channel $CHANNEL, country $COUNTRY)"
     echo
-    echo "Next: write /etc/hostapd/ldn-ap.conf from config/ldn-ap.conf and run"
-    echo "      hostapd /etc/hostapd/ldn-ap.conf &"
+    echo "Next: hostapd config/ldn-ap.conf &"
+    echo "      (set interface= to '$IFACE' and channel= to '$CHANNEL')"
     ;;
 
 selfcheck)
     echo "=== $IFACE ==="
-    iw dev | sed 's/^/  /'
+    iw dev 2>/dev/null | sed 's/^/  /'
     iw dev "$IFACE" info 2>/dev/null | sed 's/^/  /'
-    iw phy "$IFACE" channels 2>/dev/null | grep -E "^\s+\*|MHz" | head -20 || true
 
-    # Can we create a VIF at all?
-    iw dev "$IFACE" interface add __probe_mon type monitor 2>/dev/null && \
-        { echo "  monitor VIF: OK"; iw dev __probe_mon del; } || \
-        echo "  monitor VIF: UNSUPPORTED (fall back to a single monitor iface)"
+    # Read-only capability check. Do NOT probe by creating a monitor VIF: on
+    # this driver that is the operation that hangs the machine.
+    phy=$(iw dev "$IFACE" info 2>/dev/null | awk '/wiphy/{print $2}')
+    if [ -n "${phy:-}" ]; then
+        echo "  --- supported interface modes (phy$phy) ---"
+        iw phy "phy$phy" info 2>/dev/null |
+            awk '/Supported interface modes/{f=1;next} f&&/^\t\t \*/{print "  " $0} f&&/^\t[A-Z]/{exit}'
+        for want in AP monitor; do
+            if iw phy "phy$phy" info 2>/dev/null |
+                sed -n '/Supported interface modes/,/^\t[A-Z]/p' | grep -q "\* $want"; then
+                echo "  $want: supported"
+            else
+                echo "  $want: NOT supported"
+            fi
+        done
+    fi
 
-    ./switch_ldn --selfcheck "$IFACE"
+    echo "  --- channels (first few) ---"
+    iw phy "${phy:-$IFACE}" channels 2>/dev/null | head -12 || true
+
+    # The bridge's own probe: exits nonzero for a missing interface or one with
+    # no wireless extensions.
+    if [ -x ./switch_ldn ]; then
+        ./switch_ldn --selfcheck "$IFACE" || echo "  switch_ldn --selfcheck FAILED (see above)"
+    else
+        echo "  ./switch_ldn not built, skipping its probe"
+    fi
+
+    cat <<'EOF'
+
+  Note: "monitor: supported" means the driver advertises the mode, which is all
+  the bridge needs to know. Do not try it: creating a monitor VIF on the
+  RTL8812AU wedges the kernel, and nothing here requires one.
+EOF
     ;;
 
 down)
-    for v in "$MON_IFACE" "$AP_IFACE"; do
-        iw dev "$v" del 2>/dev/null || true
-    done
+    ip link set "$IFACE" down 2>/dev/null || true
     systemctl start NetworkManager 2>/dev/null || service network-manager start 2>/dev/null || true
     ;;
 

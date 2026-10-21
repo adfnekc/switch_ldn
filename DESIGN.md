@@ -225,7 +225,7 @@ hostapd config/ldn-ap.conf &
 scripts/setup-ap.sh selfcheck
 
 # 3. bridge
-sudo ./switch_ldn --ap-iface wlan0_ap --mon-iface wlan0_mon \
+sudo ./switch_ldn --ap-iface wlan0 \
     --channel 1 --prodkeys prod.keys
 ```
 

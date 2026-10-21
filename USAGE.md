@@ -29,7 +29,7 @@
 ## 场景 A：Ryubing（最省事，推荐先跑通）
 
 ```bash
-./switch_ldn --ap-iface wlan0_ap --mon-iface wlan0_mon --channel 1 --prodkeys prod.keys
+./switch_ldn --ap-iface wlan0 --channel 1 --prodkeys prod.keys
 ```
 
 然后 Ryubing：`Multiplayer → LDN → Mode: RyuLDN`，服务器填 `127.0.0.1`，端口 `30456`。
@@ -42,7 +42,7 @@
 命令和场景 A **完全一样**：
 
 ```bash
-./switch_ldn --ap-iface wlan0_ap --mon-iface wlan0_mon --channel 1 --prodkeys prod.keys
+./switch_ldn --ap-iface wlan0 --channel 1 --prodkeys prod.keys
 ```
 
 然后 Eden：`Multiplayer → Direct Connect → 127.0.0.1:24872`。
@@ -111,14 +111,14 @@ ERROR Room transport: cannot build the LDN network for title 01001b300b9be000,
 # 1. 探测网卡能力（都不支持就换芯片，见下）
 sudo IFACE=wlan0 CHANNEL=1 scripts/setup-ap.sh selfcheck
 
-# 2. 起网卡：一个 AP 接口 + 一个 monitor 接口
+# 2. 起网卡：只用物理接口，不建虚拟接口
 sudo IFACE=wlan0 CHANNEL=1 scripts/setup-ap.sh up
 
 # 3. hostapd：隐藏 SSID + 开放认证 + 无 WPA
 hostapd config/ldn-ap.conf &
 
 # 4. 桥
-sudo ./switch_ldn --ap-iface wlan0_ap --mon-iface wlan0_mon \
+sudo ./switch_ldn --ap-iface wlan0 \
     --channel 1 --prodkeys prod.keys
 ```
 
@@ -163,13 +163,18 @@ datagram socket 冒充成射频，驱动**真实二进制**——不需要 root�
 
 ## 硬件要求
 
-必须是能进 monitor 模式**并支持帧注入**的网卡。当前适配的是 RTL8812AU
-（配 aircrack-ng 的 out-of-tree 驱动）。
+必须是能开 **AP 模式**的网卡。当前适配的是 RTL8812AU（配 aircrack-ng 的
+out-of-tree 驱动；内核 ≥6.13 的主线 `rtw88` 也可以，但它的帧注入能力不足）。
 
-已知坑：该驱动的虚拟接口支持不稳定（aircrack-ng/rtl8812au issue #93、#376）。
-`setup-ap.sh selfcheck` 会先探，如果 monitor VIF 建不出来，退路是单 monitor
-接口 + 自己实现 802.11 MAC 状态机，见 `DESIGN.md §3b`。换 mt7610u / mt7612u /
-mt7921au 这类内核原生支持好的芯片会省事很多。
+> **不需要 monitor 接口。** 早期设计需要「AP + monitor」两个接口来注入广告帧，
+> 但 RTL8812AU 的驱动在创建 monitor VIF 时会**直接卡死内核**（三次实测，症状是
+> ping 通但 ssh 拿不到 banner；aircrack-ng/rtl8812au #93/#376）。现在广告帧通过
+> nl80211 的 `.mgmt_tx` 在 AP 接口本身上发送，**只用一个物理接口**。详见
+> `docs/HARDWARE_CHECKLIST.md`。
+
+已知坑：该驱动的虚拟接口支持不稳定，所以 `setup-ap.sh` 现在**不建任何 VIF**，
+`selfcheck` 也只做只读探测（探测方式本身就是建 monitor VIF，那正是会卡死的
+操作）。换 mt7610u / mt7612u / mt7921au 这类内核原生支持好的芯片会省事很多。
 
 ## 房间的可见性
 
@@ -196,7 +201,7 @@ mt7921au 这类内核原生支持好的芯片会省事很多。
 
 | 现象 | 大概率原因 |
 |---|---|
-| 真机完全搜不到房间 | 信道不匹配；或 monitor 接口注入失败（看日志有没有 advertisement） |
+| 真机完全搜不到房间 | 信道不匹配；或广告帧没发出去（`dmesg | grep RTW_Tx` 看有没有在发送） |
 | 真机能看到房但进不去 | 密语不对，或游戏版本不匹配（游戏自己比 `local_communication_version`） |
 | 模拟器侧一直转圈 | 端口没连到桥；Room 路径检查补丁是否已打 |
 

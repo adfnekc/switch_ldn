@@ -14,14 +14,20 @@
  *
  * Design (see DESIGN.md section 3):
  *
- *   The bridge is the LDN *host*. hostapd runs a minimal hidden-AP on one
- *   virtual interface (SSID zeroed in beacons, open authentication, no WPA),
- *   which gives us auth/assoc/IP management for free. A second interface in
- *   monitor mode injects the LDN vendor-specific action frames every 100 ms,
- *   because neither hostapd nor the kernel drivers implement that.
+ *   The bridge is the LDN *host*. hostapd runs a minimal AP on ONE interface
+ *   (SSID hidden in beacons, open authentication, no WPA), which gives us
+ *   auth/assoc/IP management for free.
  *
- *   LDN control frames (ethertype 0x88B7) and Pia game traffic ride the AP's
- *   bridge interface and are read/written through AF_PACKET raw sockets.
+ *   LDN control frames (ethertype 0x88B7) and Pia game traffic ride that
+ *   interface and are read/written through an AF_PACKET raw socket: the kernel
+ *   and hostapd bridge them to 802.11 data frames.
+ *
+ *   The LDN vendor-specific action frames cannot go through that path, so they
+ *   are injected with nl80211 .mgmt_tx on the same interface every 100 ms (see
+ *   nl80211.h). The original design used a second, monitor-mode interface for
+ *   this; on the RTL8812AU creating that VIF wedges the kernel, and .mgmt_tx
+ *   makes it unnecessary. A monitor interface is still accepted (--mon-iface)
+ *   for drivers where it works.
  *
  *   Scope note: the monitor-interface receive path (pump_monitor) is for
  *   diagnostics only - it lets you see *someone else's* LDN networks in the
@@ -33,9 +39,8 @@
  * that challenge, so we can just answer "success" - no ownership proof needed.
  *
  * Known hardware caveat: the out-of-tree RTL8812AU driver (aircrack-ng fork)
- * has flaky virtual-interface support. `radio_selfcheck` reports what the
- * actually loaded driver supports before you rely on the split AP/monitor
- * layout; the fallback (pure monitor + own MAC FSM) is documented in DESIGN.md.
+ * has flaky virtual-interface support - a monitor VIF hangs it outright.
+ * `radio_selfcheck` therefore only reports capabilities and never creates one.
  */
 
 #define RADIO_MAX_VAPS 2
