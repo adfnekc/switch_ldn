@@ -61,6 +61,21 @@ int main(void)
 
     const uint8_t *body = out + IEEE80211_HDRLEN;
 
+    /*
+     * The AP interface carries the very same thing as an Ethernet frame with
+     * ethertype 0x88B7, so ldn_build_auth_body() must produce exactly the body
+     * the 802.11 builder wraps - otherwise the two paths would disagree about
+     * what goes on the wire and only one of them is exercised by the tests.
+     */
+    {
+        uint8_t body_only[6 + LDN_AUTH_HEADER_SIZE + LDN_AUTH_RESPONSE_PAYLOAD];
+        size_t body_len = 0;
+        int bn = ldn_build_auth_body(body_only, sizeof(body_only), &auth, &body_len);
+        assert(bn > 0);
+        assert((size_t)bn == (size_t)n - IEEE80211_HDRLEN);
+        assert(memcmp(body_only, body, (size_t)bn) == 0);
+    }
+
     /* --- body prefix: OUI, packet type 258, pad --- */
     assert(body[0] == LDN_OUI_0 && body[1] == LDN_OUI_1 && body[2] == LDN_OUI_2);
     assert(rd_be16(body + 3) == LDN_PACKET_AUTHENTICATION);
@@ -99,7 +114,13 @@ int main(void)
         assert(p[LDN_AUTH_HEADER_SIZE - 6 + i] == 0);
     }
 
-    assert((size_t)n == IEEE80211_HDRLEN + LDN_AUTH_HEADER_SIZE +
+    /*
+     * 24-byte 802.11 header + 6-byte 0x88B7 body prefix + the LDN header +
+     * the response payload. The "+ 6" used to be missing here and in every
+     * caller's buffer, so the builder wrote six bytes past the end of them -
+     * invisible because the overflow landed in padding.
+     */
+    assert((size_t)n == IEEE80211_HDRLEN + 6 + LDN_AUTH_HEADER_SIZE +
                            LDN_AUTH_RESPONSE_PAYLOAD);
     assert(payload_len == LDN_AUTH_RESPONSE_PAYLOAD);
 

@@ -456,8 +456,8 @@ void host_tick(Host *host, Radio *radio)
  * server_random from an advertisement we have since replaced) is reported as
  * LDN_AUTH_MALFORMED_REQUEST.
  */
-static void reject_auth(Host *host, Radio *radio, const LdnAuthData *auth,
-                        uint8_t status)
+static void reject_auth(Host *host, Radio *radio, const uint8_t station_mac[6],
+                        const LdnAuthData *auth, uint8_t status)
 {
     LdnAuthData rej;
     memset(&rej, 0, sizeof(rej));
@@ -475,13 +475,15 @@ static void reject_auth(Host *host, Radio *radio, const LdnAuthData *auth,
         return;
     }
 
-    uint8_t buf[IEEE80211_HDRLEN + LDN_AUTH_HEADER_SIZE +
-                LDN_AUTH_RESPONSE_PAYLOAD];
+    /*
+     * Ethernet + 0x88B7, not a raw 802.11 frame: this goes to the AP
+     * interface, which hostapd bridges to the station.
+     */
+    uint8_t buf[6 + LDN_AUTH_HEADER_SIZE + LDN_AUTH_RESPONSE_PAYLOAD];
     size_t len = 0;
-    int n = ldn_build_auth_frame(buf, sizeof(buf), radio_config(radio)->mac,
-                                 radio_config(radio)->mac, &rej, &len);
+    int n = ldn_build_auth_body(buf, sizeof(buf), &rej, &len);
     if (n > 0) {
-        radio_send(radio, buf, (size_t)n);
+        radio_send_ldn_control(radio, station_mac, buf, (size_t)n);
     }
 }
 
@@ -556,12 +558,12 @@ bool host_handle_frame(Host *host, Radio *radio, const RadioFrame *frame)
                   frame->src_mac[0], frame->src_mac[1], frame->src_mac[2],
                   frame->src_mac[3], frame->src_mac[4], frame->src_mac[5],
                   auth.version);
-            reject_auth(host, radio, &auth, LDN_AUTH_INVALID_VERSION);
+            reject_auth(host, radio, frame->src_mac, &auth, LDN_AUTH_INVALID_VERSION);
             return true;
         }
 
         if (auth.status_code != LDN_AUTH_SUCCESS) {
-            reject_auth(host, radio, &auth, LDN_AUTH_MALFORMED_REQUEST);
+            reject_auth(host, radio, frame->src_mac, &auth, LDN_AUTH_MALFORMED_REQUEST);
             return true;
         }
 
@@ -576,7 +578,7 @@ bool host_handle_frame(Host *host, Radio *radio, const RadioFrame *frame)
                   "does not match our current advertisement",
                   frame->src_mac[0], frame->src_mac[1], frame->src_mac[2],
                   frame->src_mac[3], frame->src_mac[4], frame->src_mac[5]);
-            reject_auth(host, radio, &auth, LDN_AUTH_MALFORMED_REQUEST);
+            reject_auth(host, radio, frame->src_mac, &auth, LDN_AUTH_MALFORMED_REQUEST);
             return true;
         }
 
@@ -608,7 +610,7 @@ bool host_handle_frame(Host *host, Radio *radio, const RadioFrame *frame)
                   (unsigned long long)got_id, got_scene, (unsigned long long)want_id,
                   want_scene);
 
-            reject_auth(host, radio, &auth, LDN_AUTH_MALFORMED_REQUEST);
+            reject_auth(host, radio, frame->src_mac, &auth, LDN_AUTH_MALFORMED_REQUEST);
             return true;
         }
 
@@ -617,7 +619,7 @@ bool host_handle_frame(Host *host, Radio *radio, const RadioFrame *frame)
                   "with the host/AP MAC",
                   frame->src_mac[0], frame->src_mac[1], frame->src_mac[2],
                   frame->src_mac[3], frame->src_mac[4], frame->src_mac[5]);
-            reject_auth(host, radio, &auth, LDN_AUTH_MALFORMED_REQUEST);
+            reject_auth(host, radio, frame->src_mac, &auth, LDN_AUTH_MALFORMED_REQUEST);
             return true;
         }
 
@@ -671,17 +673,20 @@ bool host_handle_frame(Host *host, Radio *radio, const RadioFrame *frame)
         resp.has_challenge = auth.has_challenge;
         resp.challenge_ok = 1;
 
-        uint8_t out[IEEE80211_HDRLEN + LDN_AUTH_HEADER_SIZE + LDN_AUTH_RESPONSE_PAYLOAD];
+        uint8_t out[6 + LDN_AUTH_HEADER_SIZE + LDN_AUTH_RESPONSE_PAYLOAD];
         size_t payload_len = 0;
         if (!radio) {
             LOG_W("host_handle_frame: no radio attached; auth response not sent");
             return true;
         }
-        int n = ldn_build_auth_frame(out, sizeof(out), radio_config(radio)->mac,
-                                     radio_config(radio)->mac, &resp, &payload_len);
+        int n = ldn_build_auth_body(out, sizeof(out), &resp, &payload_len);
         if (n > 0) {
-            radio_send(radio, out, (size_t)n);
-            LOG_D("sent auth success to station %d", idx);
+            /* Ethernet + 0x88B7 on the AP interface; see radio.h. */
+            if (radio_send_ldn_control(radio, frame->src_mac, out, (size_t)n) != 0) {
+                LOG_E("could not send the auth response to station %d", idx);
+            } else {
+                LOG_D("sent auth success to station %d", idx);
+            }
         }
         return true;
     }

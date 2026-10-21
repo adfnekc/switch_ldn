@@ -199,6 +199,19 @@ int ldn_build_auth_frame(uint8_t *out, size_t out_len, const uint8_t mac[6],
                          const uint8_t bssid[6], const LdnAuthData *auth,
                          size_t *payload_len);
 
+/*
+ * The same frame without the 802.11 header: just the 0x88B7 body
+ * (OUI, packet type, pad, LDN header, payload).
+ *
+ * This is the shape that belongs in an Ethernet frame with ethertype 0x88B7,
+ * which is how an AP interface carries LDN control frames - the kernel and
+ * hostapd turn that into a data frame to the station. Writing the 802.11 form
+ * to the AP interface instead hands the kernel an Ethernet frame with a bogus
+ * ethertype, and the station never sees it.
+ */
+int ldn_build_auth_body(uint8_t *out, size_t out_len, const LdnAuthData *auth,
+                        size_t *payload_len);
+
 int ldn_parse_auth_frame(const uint8_t *frame, size_t frame_len, LdnAuthData *auth);
 
 /* Channel helper: encodes (band << 10) | channel as the wiki describes. */

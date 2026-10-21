@@ -612,6 +612,25 @@ int radio_send(Radio *radio, const uint8_t *frame, size_t len)
     return 0;
 }
 
+int radio_send_ldn_control(Radio *radio, const uint8_t dst_mac[6], const void *body,
+                           size_t len)
+{
+    if (!radio || !dst_mac || !body || len == 0) {
+        return -1;
+    }
+    /* Ethernet header: 6 + 6 + 2, then the LDN body. */
+    if (len > 1500) {
+        LOG_E("radio_send_ldn_control: %zu-byte body is too large", len);
+        return -1;
+    }
+    uint8_t frame[14 + 1500];
+    memcpy(frame, dst_mac, 6);
+    memcpy(frame + 6, radio->cfg.mac, 6);
+    wr_be16(frame + 12, ETH_P_LDN);
+    memcpy(frame + 14, body, len);
+    return radio_send(radio, frame, 14 + len);
+}
+
 int radio_send_action_frame(Radio *radio, const uint8_t *body, size_t len)
 {
     if (!radio) {

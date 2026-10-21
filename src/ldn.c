@@ -236,29 +236,21 @@ static void build_88b7_header(uint8_t *body, uint16_t packet_type)
  * an all-zero counter block whenever a data key was supplied, which produces
  * garbage - the caller passing NULL was the only thing keeping it working.
  */
-int ldn_build_auth_frame(uint8_t *out, size_t out_len, const uint8_t mac[6],
-                         const uint8_t bssid[6], const LdnAuthData *auth,
-                         size_t *payload_len)
+int ldn_build_auth_body(uint8_t *out, size_t out_len, const LdnAuthData *auth,
+                        size_t *payload_len)
 {
     /*
      * A response is 0x4E + 0x84 bytes; the caller only has to supply that.
      * Zero-filling it means platform + 0x83 zero bytes come out for free.
      */
-    size_t need = IEEE80211_HDRLEN + LDN_AUTH_HEADER_SIZE + LDN_AUTH_RESPONSE_PAYLOAD;
+    size_t need = 6 + LDN_AUTH_HEADER_SIZE + LDN_AUTH_RESPONSE_PAYLOAD;
     if (out_len < need) {
         return -1;
     }
 
     memset(out, 0, need);
 
-    wr_le16(out + 0, 0x0008); /* data frame, QoS-less (802.11 is little-endian) */
-    wr_le16(out + 2, 0);
-    memcpy(out + 4, bssid, 6);   /* addr1 = BSSID */
-    memcpy(out + 10, mac, 6);    /* addr2 = source */
-    memcpy(out + 16, bssid, 6);  /* addr3 */
-    wr_le16(out + 22, 0);        /* seq, little-endian */
-
-    uint8_t *body = out + IEEE80211_HDRLEN;
+    uint8_t *body = out;
     build_88b7_header(body, LDN_PACKET_AUTHENTICATION);
 
     uint8_t *p = body + 6;
@@ -299,6 +291,34 @@ int ldn_build_auth_frame(uint8_t *out, size_t out_len, const uint8_t mac[6],
         *payload_len = auth->payload_size;
     }
     return (int)need;
+}
+
+int ldn_build_auth_frame(uint8_t *out, size_t out_len, const uint8_t mac[6],
+                         const uint8_t bssid[6], const LdnAuthData *auth,
+                         size_t *payload_len)
+{
+    size_t body_len = 0;
+    if (out_len < IEEE80211_HDRLEN) {
+        return -1;
+    }
+    int n = ldn_build_auth_body(out + IEEE80211_HDRLEN, out_len - IEEE80211_HDRLEN,
+                                auth, &body_len);
+    if (n < 0) {
+        return -1;
+    }
+
+    memset(out, 0, IEEE80211_HDRLEN);
+    wr_le16(out + 0, 0x0008); /* data frame, QoS-less (802.11 is little-endian) */
+    wr_le16(out + 2, 0);
+    memcpy(out + 4, bssid, 6);   /* addr1 = BSSID */
+    memcpy(out + 10, mac, 6);    /* addr2 = source */
+    memcpy(out + 16, bssid, 6);  /* addr3 */
+    wr_le16(out + 22, 0);        /* seq, little-endian */
+
+    if (payload_len) {
+        *payload_len = body_len;
+    }
+    return (int)(IEEE80211_HDRLEN + (size_t)n);
 }
 
 int ldn_parse_auth_frame(const uint8_t *frame, size_t frame_len, LdnAuthData *auth)

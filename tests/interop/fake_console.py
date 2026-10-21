@@ -267,6 +267,14 @@ class FakeConsole:
                 print(f"  <recv {len(data)} bytes>", flush=True)
         except (socket.timeout, TimeoutError):
             return None
+        # An LDN control frame arrives as an Ethernet frame with ethertype
+        # 0x88B7: that is how an AP interface carries it, and how hostapd
+        # bridges it to the station. Strip the 14-byte header and hand back the
+        # 0x88B7 body, which is what the parsers below expect.
+        if len(data) >= 14 and struct.unpack(">H", data[12:14])[0] == 0x88B7:
+            if self.verbose:
+                print("  <ethernet LDN control>", flush=True)
+            return data[14:]
         if len(data) < IEEE80211_HDRLEN:
             return None
         # addr1 is the destination (+4), addr2 the transmitter (+10) - the

@@ -113,6 +113,19 @@ void radio_close(Radio *radio);
 /* Send a raw 802.11 frame on the AP interface. */
 int radio_send(Radio *radio, const uint8_t *frame, size_t len);
 
+/*
+ * Send an LDN control frame to a station.
+ *
+ * `body` is the 0x88B7 body (see ldn_build_auth_body). It is wrapped in an
+ * Ethernet frame with ethertype 0x88B7 and written to the AP interface, which
+ * is the only framing that interface understands - hostapd and the kernel turn
+ * it into an 802.11 data frame addressed to `dst_mac`. Passing a raw 802.11
+ * frame to radio_send() instead produces an Ethernet frame with a bogus
+ * ethertype, and the station never receives anything.
+ */
+int radio_send_ldn_control(Radio *radio, const uint8_t dst_mac[6],
+                           const void *body, size_t len);
+
 /* Inject a vendor-specific action frame on the monitor interface. */
 int radio_send_action_frame(Radio *radio, const uint8_t *body, size_t len);
 
