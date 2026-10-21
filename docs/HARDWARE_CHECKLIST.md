@@ -281,6 +281,54 @@ passphrase never arrived` is the RyuLdn-side equivalent of the Eden patch
 problem, and `station joined:` never appearing means no console ever
 authenticated.
 
+## Stage 4 result (measured): no monitor VIF — use nl80211 mgmt_tx
+
+The design assumed two VIFs: an AP managed by hostapd, and a monitor VIF for
+injecting the LDN action frames. On the RTL8812AU that second VIF is not
+available, and asking for it does not fail gracefully:
+
+```console
+$ iw dev wlx... interface add mon0 type monitor
+# ...and the machine is gone. ping still answers, ssh never gets a banner.
+```
+
+Reproduced three times on Debian 13 / kernel 6.12 / aircrack-ng v5.13.6,
+including with the base interface left DOWN. It is the fragility
+`aircrack-ng/rtl8812au` issues #93 and #376 describe, so treat any plan that
+needs a second VIF on this chip as dead.
+
+**It is not needed.** The driver implements cfg80211's `.mgmt_tx`, so the
+advertisement can be injected on the AP interface itself. `scripts/mgmt_tx_probe.c`
+proves it end to end:
+
+```console
+$ ./mgmt_tx_probe wlx54c9ff02cd3b
+sending 37-byte action frame on wlx54c9ff02cd3b (ifindex 4)
+command accepted (ACK)
+$ dmesg | tail -2
+RTW: RTW_Tx:tx_ch=1, no_cck=0, da=ff:ff:ff:ff:ff:ff
+RTW: RTW_Tx:OUI_Subtype=222, dialogToken=173
+```
+
+Two details decide whether this returns -EINVAL, -ENOTCONN or success:
+
+| Requirement | Why |
+|---|---|
+| the interface must be in **AP mode** (hostapd running) | in managed mode and unassociated the kernel answers `-ENOTCONN` |
+| `NL80211_ATTR_WIPHY_FREQ` **plus** `CHANNEL_WIDTH` **plus** `CENTER_FREQ1` | freq alone is not a parseable chandef (`-EINVAL` from cfg80211); with no freq at all `params->chan` is NULL and the driver returns `-EINVAL` itself |
+
+So the architecture becomes one interface:
+
+- **AP + data**: hostapd on the one interface; the console associates normally
+  and Pia traffic is bridged as before.
+- **Advertisement TX**: `NL80211_CMD_FRAME` on that same interface.
+- **LDN control RX**: `NL80211_CMD_REGISTER_FRAME` for the category-127 action
+  frames instead of reading them off a monitor device.
+
+That removes the monitor interface from the design entirely, which is the
+smaller of the two fallbacks in DESIGN.md §3b — no 802.11 MAC state machine,
+just a different injection API.
+
 ## Stage 4 — action-frame injection, before any console
 
 This is the first genuinely unvalidated step, and it is worth proving alone:
