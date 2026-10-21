@@ -329,6 +329,25 @@ That removes the monitor interface from the design entirely, which is the
 smaller of the two fallbacks in DESIGN.md §3b — no 802.11 MAC state machine,
 just a different injection API.
 
+### Stage 4, measured: the advertisements do go out
+
+With hostapd holding the interface in AP mode and the bridge started with only
+`--ap-iface` (no `--mon-iface`, so the nl80211 path), the driver log shows the
+advertisement leaving every ~100 ms:
+
+```console
+$ dmesg | grep -c RTW_Tx
+288  ... 376        # over 5 s, two log lines per frame
+$ dmesg | grep RTW_Tx | tail -2
+RTW: RTW_Tx:tx_ch=1, no_cck=0, da=ff:ff:ff:ff:ff:ff
+RTW: RTW_Tx:P2P_NOTICE_OF_ABSENCE, dialogToken=1
+```
+
+The bridge logs no warnings, and `mgmt_tx rejected` does not appear at all. Note
+the driver labels the frame `P2P_NOTICE_OF_ABSENCE`: it recognises the
+vendor-specific category 127 and the `00:22:aa` OUI as P2P, which is the same
+OUI LDN uses. The label is cosmetic; the bytes go out unchanged.
+
 ## Stage 4 — action-frame injection, before any console
 
 This is the first genuinely unvalidated step, and it is worth proving alone:

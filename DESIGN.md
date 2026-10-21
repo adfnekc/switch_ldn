@@ -362,11 +362,17 @@ the zstd step in `IdProxyPacket`), the whole console → bridge chain against an
 independently-derived key, adopting the guest's `CreateNetwork` settings, the
 station watchdog, and refusing p1.
 
-Not yet validated (no hardware in the loop): actual radio I/O, action-frame
-injection on the RTL8812AU, and the end-to-end handshake against a real
-console. `make console-sim` covers the same chain with a socket standing in for
-the radio, so a failure after this point is the radio, not the protocol.
-See [README.md](README.md#what-is-left) for the ordered hardware checklist.
+Validated on hardware (Debian 13, kernel 6.12, RTL8812AU): the aircrack-ng
+driver builds and loads, hostapd runs the AP, and the LDN advertisement is
+transmitted every ~100 ms over nl80211 on the AP interface. The monitor VIF the
+design originally assumed wedges that driver, so it is gone from the
+architecture - one interface does both jobs. See
+[docs/HARDWARE_CHECKLIST.md](docs/HARDWARE_CHECKLIST.md).
+
+Not yet validated: a real console finding and joining that network, and the
+authentication and Pia exchange that follow. `make console-sim` covers that
+chain with a socket standing in for the radio, so a failure past this point is
+the radio, not the protocol.
 
 ## Sources
 
