@@ -1,0 +1,120 @@
+rtl8812au: build against Linux 6.12
+
+Build fixes for aircrack-ng/rtl8812au at commit ee6490b ("Turn of
+CONFIG_MP_INCLUDED"), which is what `make` needs before the driver will even
+compile on a current kernel. Measured on Debian 13, kernel 6.12.113.
+
+Four changes, all of them API drift rather than behaviour:
+
+  1. cfg80211_rtw_change_beacon() takes struct cfg80211_ap_update * instead of
+     struct cfg80211_beacon_data * (kernel 6.12).
+  2. cfg80211_rtw_set_monitor_channel() gained a struct net_device * argument
+     (kernel 6.12).
+  3. strlcpy() is gone from the kernel headers; strscpy() has the same call
+     shape for these uses.
+  4. .usbdrv.drvwrap.driver.shutdown no longer exists (kernel 6.5); the driver's
+     shutdown hook is not settable that way any more.
+  5. REGULATORY_IGNORE_STALE_KICKOFF is not exported by every kernel's headers
+     (Debian 6.12 does not have it). It is only a hint, so it is skipped.
+
+Apply with scripts/build_rtl8812au.sh, which detects a fresh tree, an already
+patched tree and a base mismatch separately.
+
+Note that all of this is *compilation*. The behaviour this project depends on -
+AP mode plus nl80211 .mgmt_tx on the AP interface - is driver-independent, and
+was verified separately; see docs/HARDWARE_CHECKLIST.md stage 4.
+
+diff --git a/os_dep/linux/ioctl_cfg80211.c b/os_dep/linux/ioctl_cfg80211.c
+index 89b9ac8..6dbcef9 100644
+--- a/os_dep/linux/ioctl_cfg80211.c
++++ b/os_dep/linux/ioctl_cfg80211.c
+@@ -5398,8 +5398,14 @@ exit:
+ }
+ 
+ static int cfg80211_rtw_change_beacon(struct wiphy *wiphy, struct net_device *ndev,
++#if (LINUX_VERSION_CODE >= KERNEL_VERSION(6, 12, 0))
++		struct cfg80211_ap_update *params)
++{
++	struct cfg80211_beacon_data *info = &params->beacon;
++#else
+ 		struct cfg80211_beacon_data *info)
+ {
++#endif
+ 	int ret = 0;
+ 	_adapter *adapter = (_adapter *)rtw_netdev_priv(ndev);
+ 
+@@ -6884,6 +6890,9 @@ static void rtw_get_chbwoff_from_cfg80211_chan_def(
+ #endif /* (LINUX_VERSION_CODE >= KERNEL_VERSION(3, 8, 0)) */
+ 
+ static int cfg80211_rtw_set_monitor_channel(struct wiphy *wiphy
++#if (LINUX_VERSION_CODE >= KERNEL_VERSION(6, 12, 0))
++	, struct net_device *ndev
++#endif
+ #if (LINUX_VERSION_CODE >= KERNEL_VERSION(3, 8, 0))
+ 	, struct cfg80211_chan_def *chandef
+ #else
+diff --git a/os_dep/linux/os_intfs.c b/os_dep/linux/os_intfs.c
+index b2d24f8..9146297 100644
+--- a/os_dep/linux/os_intfs.c
++++ b/os_dep/linux/os_intfs.c
+@@ -2034,13 +2034,13 @@ static void rtw_ethtool_get_drvinfo(struct net_device *dev, struct ethtool_drvin
+ 
+ 	wdev = dev->ieee80211_ptr;
+ 	if (wdev) {
+-		strlcpy(info->driver, wiphy_dev(wdev->wiphy)->driver->name,
++		strscpy(info->driver, wiphy_dev(wdev->wiphy)->driver->name,
+ 			sizeof(info->driver));
+ 	} else {
+-		strlcpy(info->driver, "N/A", sizeof(info->driver));
++		strscpy(info->driver, "N/A", sizeof(info->driver));
+ 	}
+ 
+-	strlcpy(info->version, DRIVERVERSION, sizeof(info->version));
++	strscpy(info->version, DRIVERVERSION, sizeof(info->version));
+ 
+ 	padapter = (_adapter *)rtw_netdev_priv(dev);
+ 	if (padapter) {
+@@ -2051,10 +2051,10 @@ static void rtw_ethtool_get_drvinfo(struct net_device *dev, struct ethtool_drvin
+ 		scnprintf(info->fw_version, sizeof(info->fw_version), "%d.%d",
+ 			  hal_data->firmware_version, hal_data->firmware_sub_version);
+ 	} else {
+-		strlcpy(info->fw_version, "N/A", sizeof(info->fw_version));
++		strscpy(info->fw_version, "N/A", sizeof(info->fw_version));
+ 	}
+ 
+-	strlcpy(info->bus_info, dev_name(wiphy_dev(wdev->wiphy)),
++	strscpy(info->bus_info, dev_name(wiphy_dev(wdev->wiphy)),
+ 		sizeof(info->bus_info));
+ }
+ 
+diff --git a/os_dep/linux/usb_intf.c b/os_dep/linux/usb_intf.c
+index a326c3f..f9b5759 100644
+--- a/os_dep/linux/usb_intf.c
++++ b/os_dep/linux/usb_intf.c
+@@ -360,7 +360,7 @@ struct rtw_usb_drv usb_drv = {
+ #endif
+ 
+ #if (LINUX_VERSION_CODE >= KERNEL_VERSION(2, 6, 19))
+-	.usbdrv.drvwrap.driver.shutdown = rtw_dev_shutdown,
++	/* .drvwrap removed in kernel >= 6.5; shutdown is not settable this way */
+ #else
+ 	.usbdrv.driver.shutdown = rtw_dev_shutdown,
+ #endif
+diff --git a/os_dep/linux/wifi_regd.c b/os_dep/linux/wifi_regd.c
+index 81e1dc7..5fb013c 100644
+--- a/os_dep/linux/wifi_regd.c
++++ b/os_dep/linux/wifi_regd.c
+@@ -405,9 +405,10 @@ int rtw_regd_init(struct wiphy *wiphy)
+ 	wiphy->regulatory_flags &= ~REGULATORY_DISABLE_BEACON_HINTS;
+ #endif
+ 
+-#if (LINUX_VERSION_CODE >= KERNEL_VERSION(3, 19, 0))
+-	wiphy->regulatory_flags |= REGULATORY_IGNORE_STALE_KICKOFF;
+-#endif
++/*
++ * REGULATORY_IGNORE_STALE_KICKOFF is not in every kernel's exported headers
++ * (it is absent from Debian's 6.12), and it is only a hint, so skip it.
++ */
+ 
+ 	return 0;
+ }

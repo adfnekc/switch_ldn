@@ -256,6 +256,8 @@ make test
 | `tests/test_ctr_vectors.c` | The AES-CTR counter block, byte-for-byte, against vectors generated with PyCryptodome under `nonce || 0^12` (`tests/ctr_vectors.h`) |
 | `tests/test_auth_frame.c` | The LDN authentication frame layout: field order, little-/big-endian choices and the no-truncation guarantee on the response payload |
 | `tests/test_advert_nonce.c` | The 4-byte advertisement nonce: changes per emission, advances by exactly one, carries on wrap, survives a reconfigure |
+| `tests/test_frame_classify.c` | How a frame arriving on the AP interface is classified: Ethernet `0x88B7` + the `00:22:aa` OUI is LDN control, Ethernet IPv4/IPv6/ARP is game traffic, raw 802.11 action/data is the harness path, everything else is a logged drop. Keys on the OUI and packet type, not on the ethertype — a control frame is still control when its ethertype says something else. This is the regression test for the bug that made every inbound authentication request get parsed as 802.11. |
+| `tests/test_prodkeys_load.c` | prod.keys parsing: a complete file loads, `master_key_01` **without** `master_key_00` is a hard failure (a zero master key would yield an advertisement that looks fine here and that no console can read), junk and unrelated keys are skipped, hex is case-insensitive, a short value is rejected rather than zero-extended, and a failed load leaves nothing half-loaded. |
 | `tests/test_host_watchdog.c` | Station bookkeeping on join (`last_seen_ms` / `joined_ms`), that the default 30 s timeout is preserved, and that a timed-out station is evicted and produces a `HOST_EVENT_STATION_LEFT` carrying the station's identity (mac, IP, username). The identity snapshot matters: the slot is cleared before the event is pushed, so a transport that re-read the table would find nothing and silently drop every departure. |
 
 Every expected byte string is transcribed from Eden's own encoders.
@@ -340,6 +342,8 @@ Everything p0 needs to be proven on real hardware:
 | 12 | `make console-sim` proves the full chain against the bridge's **real** transports with a radio standing in, but the emulator side is `ryu_peer.py` — a handshake peer, not a full client. It reads `ProxyData` and checks ports/payload, but a real Ryubing instance may expect the `NetworkInfo` in `SyncNetwork` to reflect the console differently than our synthesised node does. | `tests/interop/ryu_peer.py` |
 | 13 | **`data_key` is derived and never used, and the docs claim it encrypts data frames.** `--prodkeys` reads only `master_key_00`, `aes_kek_generation_source` and `aes_key_generation_source`, and they feed exactly one consumer that is actually on a path: the `adv_key` that AES-CTRs the advertisement payload. Without it a console cannot decrypt our advertisement and the room never appears, so it is load-bearing — but it is the *only* load-bearing use. `ldn_data_key()` is also computed into `Host::data_key` (and `keys_ready` set) and **neither is ever read**. Meanwhile [ROOM_VISIBILITY.md](docs/ROOM_VISIBILITY.md) says a wrong passphrase means "no subsequent data frame can be read by either side", i.e. real LDN encrypts data frames with that key — so either those frames are only LDN's own control traffic, which this bridge never carries, or a real console encrypts its Pia path and the relay is forwarding ciphertext. `make console-sim` cannot settle it: the fake console is our own invention and sends plain IP/UDP, so it would pass either way. Hardware will answer it. Until then `deliver_to_guest()` logs a rate-limited WARN when a console frame will not parse as IPv4/UDP, so this fails visibly instead of silently. | `src/crypto.c`, `src/host.c`, `src/main.c`, `tests/interop/prod.keys` |
 
+| 14 | **Only `master_key_00` is accepted, and only generation 0.** `parse_key_line()` matches that one name; a file exposing `master_key_01`..`master_key_0N` instead does not fail on the generation, it fails as "missing required keys" (`tests/test_prodkeys_load.c`). Two arguments say this is fine and one says it is not: local wireless works between consoles on different firmware, which would be impossible if the derivation used each console's own generation key, so the derivation is probably generation-independent; but nothing documents *which* fixed key Nintendo uses, and kinnay/LDN is a reconstruction. Hardware settles it — if a console cannot see our advertisement with a known-good prod.keys, try the console's own generation key here before suspecting the AES steps. | `src/crypto.c` |
+
 ### §3b Fallback: no hostapd
 
 If VIFs prove unreliable, drop hostapd and implement a full 802.11 MAC FSM on
@@ -350,7 +354,7 @@ Python package which implements exactly this path.
 
 ## Status
 
-p0 is complete and builds clean under `-Wall -Wextra`. 9 test suites
+p0 is complete and builds clean under `-Wall -Wextra`. 11 test suites
 pass, plus `make interop` and `make console-sim`, all without radio hardware,
 root, or a wireless NIC.
 

@@ -51,7 +51,7 @@ per-game lookup would only be a second source of truth that can disagree.
 
 ## Testing
 
-- `make test` is 9 suites, all socket-level, no radio hardware. `make interop`
+- `make test` is 11 suites, all socket-level, no radio hardware. `make interop`
   drives the bridge (radio stubbed) against source-based emulator peers, and
   `make console-sim` drives the **real** binary with `--radio-socket` against a
   fake console — see `tests/interop/`. All three run in CI.

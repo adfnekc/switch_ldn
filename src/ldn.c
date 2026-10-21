@@ -293,6 +293,44 @@ int ldn_build_auth_body(uint8_t *out, size_t out_len, const LdnAuthData *auth,
     return (int)need;
 }
 
+LdnFrameKind ldn_classify_ap_frame(const void *buf, size_t len)
+{
+    const uint8_t *p = buf;
+    const size_t eth = 14; /* struct ethhdr, spelled out to avoid the include */
+
+    /* LDN control first: it is the only thing with a 0x88B7 ethertype, and the
+     * OUI check is what tells it apart from an unrelated vendor protocol. */
+    if (len >= eth + 6) {
+        const uint8_t *b = p + eth;
+        if (b[0] == LDN_OUI_0 && b[1] == LDN_OUI_1 && b[2] == LDN_OUI_2 &&
+            (rd_be16(b + 3) == LDN_PACKET_AUTHENTICATION ||
+             rd_be16(b + 3) == LDN_PACKET_DISCONNECT)) {
+            return LDN_FRAME_CONTROL;
+        }
+    }
+
+    if (len >= eth) {
+        uint16_t etype = rd_be16(p + 12);
+        if (etype == 0x0800 || etype == 0x86DD || etype == 0x0806) {
+            return LDN_FRAME_ETHERNET;
+        }
+    }
+
+    if (len >= 2) {
+        uint16_t fc = rd_le16(p); /* 802.11 header fields are little-endian */
+        uint8_t type = (uint8_t)((fc >> 2) & 0x3);
+        uint8_t subtype = (uint8_t)((fc >> 4) & 0xF);
+        if (type == 0x00 && subtype == 0x0D) {
+            return LDN_FRAME_80211_ACTION;
+        }
+        if (type == 0x02) {
+            return LDN_FRAME_80211_DATA;
+        }
+    }
+
+    return LDN_FRAME_DROP;
+}
+
 int ldn_build_ldn_ethernet(uint8_t *out, size_t out_len, const uint8_t dst[6],
                            const uint8_t src[6], const void *body,
                            size_t body_len)

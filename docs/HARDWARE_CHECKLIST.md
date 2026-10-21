@@ -197,6 +197,33 @@ on most kernels, so it costs only a `modprobe`. The aircrack-ng out-of-tree
 driver is the fallback when `rtw88`'s monitor/injection is not good enough, and
 the checklist below assumes it.
 
+Note that mainline `rtw88_8812au` only exists **from Linux 6.13** (verified: not
+in v6.8, v6.11 or v6.12; present in v6.13 and v6.14). Every current LTS therefore
+needs the out-of-tree driver anyway.
+
+### Building the out-of-tree driver
+
+It does not compile on a current kernel without a patch. The five changes are
+API drift, not behaviour, and they are in the repo so this is one command
+instead of five compiler errors:
+
+```bash
+git clone https://github.com/aircrack-ng/rtl8812au
+git -C rtl8812au checkout ee6490b      # the pinned base
+scripts/build_rtl8812au.sh rtl8812au   # detects fresh / already patched / wrong base
+cd rtl8812au && make -j"$(nproc)" && sudo make install
+sudo modprobe 88XXau                   # the module is 88XXau, not rtl8812au
+```
+
+`build_rtl8812au.sh --check-only` decides without writing anything. The script
+distinguishes "already patched" from "wrong base version" on purpose: reporting
+an already-patched tree as a failure is how people end up applying it twice and
+then debugging the result.
+
+Measured: Debian 13, kernel `6.12.113+deb13-amd64`, driver commits `ee6490b`,
+`88XXau.ko` 7.1 MB, resulting interface `wlx54c9ff02cd3b`. **Do not create a
+monitor interface** — see stage 4.
+
 ## Stage 1 — probe the NIC
 
 ```bash

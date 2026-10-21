@@ -73,6 +73,12 @@ test: $(TEST_OBJS) build/host.o
 	$(CC) $(CFLAGS) $(CPPFLAGS) -Isrc -Itests -o build/test_advert_hash tests/test_advert_hash.c \
 	    build/ldn.o build/crypto.o build/util.o $(LDLIBS)
 	./build/test_advert_hash
+	$(CC) $(CFLAGS) $(CPPFLAGS) -Isrc -o build/test_frame_classify tests/test_frame_classify.c \
+	    build/ldn.o build/crypto.o build/util.o $(LDLIBS)
+	./build/test_frame_classify
+	$(CC) $(CFLAGS) $(CPPFLAGS) -Isrc -o build/test_prodkeys_load tests/test_prodkeys_load.c \
+	    build/crypto.o build/util.o $(LDLIBS)
+	./build/test_prodkeys_load
 
 # ---------------------------------------------------------------------------
 # CLI smoke test, also without radio hardware.
@@ -112,6 +118,14 @@ check: $(BIN)
 	    grep -q "$$p" $$h/out || { echo "ERROR: error message omits $$p"; cat $$h/out; rm -rf $$h; exit 1; }; \
 	done; \
 	echo "named all three"; rm -rf $$h /tmp/check-nokeys.sock*
+	@echo "--- the driver patch is well formed and still touches 4 files ---"
+	@n=$$(git apply --numstat patches/rtl8812au-linux-6.12.patch | wc -l); \
+	[ "$$n" = 4 ] || { echo "ERROR: driver patch touches $$n files, expected 4"; exit 1; }; \
+	echo "4 files, ok"
+	@echo "--- build_rtl8812au.sh must reject a non-driver path ---"
+	@if scripts/build_rtl8812au.sh /__no_such_dir >/dev/null 2>&1; then \
+	    echo "ERROR: accepted a directory that is not a driver checkout"; exit 1; \
+	else echo "correctly rejected"; fi
 	@echo "--- removed options must stay removed ---"
 	@for opt in --passphrase-hex --title-id --dump-adv --only; do \
 	    if ./$(BIN) $$opt x --help 2>&1 | grep -q "unrecognized option"; then \

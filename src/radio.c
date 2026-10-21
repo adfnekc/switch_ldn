@@ -293,14 +293,6 @@ static void radio_warn_no_peer(Radio *radio)
 /* Frame classification                                               */
 /* ------------------------------------------------------------------ */
 
-static uint16_t get_fc(const uint8_t *p, size_t len)
-{
-    if (len < 2) {
-        return 0;
-    }
-    return rd_le16(p); /* 802.11 header fields are little-endian */
-}
-
 static bool is_ldn_action(const uint8_t *p, size_t len)
 {
     if (len < IEEE80211_HDRLEN + 8) {
@@ -309,37 +301,6 @@ static bool is_ldn_action(const uint8_t *p, size_t len)
     const uint8_t *b = p + IEEE80211_HDRLEN;
     return b[0] == LDN_CATEGORY_VENDOR_SPECIFIC && b[1] == LDN_OUI_0 &&
            b[2] == LDN_OUI_1 && b[3] == LDN_OUI_2 && b[4] == LDN_PROTOCOL_ID;
-}
-
-/*
- * An Ethernet frame we know how to carry: IPv4/IPv6/ARP (Pia traffic) or LDN
- * control. Only used to tell an Ethernet frame from an 802.11 one, and only
- * after is_ldn_control() has already claimed the LDN case.
- *
- * Without this, pump_ap classified every non-LDN frame with get_fc(), which
- * reads bytes 0..1 of an Ethernet frame - the destination MAC - as an 802.11
- * frame control. Real Pia traffic from a console is an Ethernet frame here, so
- * it was being dropped.
- */
-static bool is_ethernet_payload(const uint8_t *p, size_t len)
-{
-    if (len < sizeof(struct ethhdr)) {
-        return false;
-    }
-    uint16_t etype = rd_be16(p + 12);
-    return etype == 0x0800 || etype == 0x86DD || etype == 0x0806 ||
-           etype == ETH_P_LDN;
-}
-
-static bool is_ldn_control(const uint8_t *p, size_t len)
-{
-    if (len < sizeof(struct ethhdr) + 6) {
-        return false;
-    }
-    const uint8_t *b = p + sizeof(struct ethhdr);
-    return b[0] == LDN_OUI_0 && b[1] == LDN_OUI_1 && b[2] == LDN_OUI_2 &&
-           (rd_be16(b + 3) == LDN_PACKET_AUTHENTICATION ||
-            rd_be16(b + 3) == LDN_PACKET_DISCONNECT);
 }
 
 /* The AP interface bridges 802.11 to Ethernet, so LDN control frames arrive
@@ -471,6 +432,25 @@ static ssize_t pump_read(Radio *r, int fd, uint8_t *buf, size_t cap)
     return n;
 }
 
+/* Rate-limited so a misbehaving peer cannot flood the log. */
+static void warn_dropped_ap_frame(const uint8_t *p, size_t len)
+{
+    static uint64_t last_ms;
+    static unsigned count;
+
+    count++;
+    uint64_t now = now_ms();
+    if (last_ms && now - last_ms < 5000) {
+        return;
+    }
+    last_ms = now;
+    uint16_t fc = len >= 2 ? rd_le16(p) : 0;
+    LOG_W("dropped %zu-byte frame on the AP interface: not LDN control (0x88B7), "
+          "not IPv4/IPv6/ARP, and not a usable 802.11 frame (fc=0x%04x); "
+          "%u dropped so far",
+          len, fc, count);
+}
+
 static void pump_ap(Radio *r)
 {
     for (int i = 0; i < 16; i++) {
@@ -479,24 +459,23 @@ static void pump_ap(Radio *r)
         if (n <= 0) {
             return;
         }
-        if (is_ldn_control(buf, (size_t)n)) {
-            /* control frames come through the bridge as Ethernet frames */
+        switch (ldn_classify_ap_frame(buf, (size_t)n)) {
+        case LDN_FRAME_CONTROL:
+            /* LDN control frames come through the bridge as Ethernet 0x88B7. */
+        case LDN_FRAME_ETHERNET:
+            /* Pia traffic, bridged out of hostapd as Ethernet. */
             emit(r, buf, (size_t)n, true);
-            continue;
-        }
-        if (is_ethernet_payload(buf, (size_t)n)) {
-            /* Pia traffic bridged out of hostapd as Ethernet. */
-            emit(r, buf, (size_t)n, true);
-            continue;
-        }
-        /* otherwise it's an 802.11 frame from the AP VAP (auth request etc.) */
-        uint16_t fc = get_fc(buf, (size_t)n);
-        uint8_t type = (uint8_t)((fc >> 2) & 0x3);
-        uint8_t subtype = (uint8_t)((fc >> 4) & 0xF);
-        if (type == 0x00 && subtype == 0x0D) { /* action */
+            break;
+        case LDN_FRAME_80211_ACTION:
+        case LDN_FRAME_80211_DATA:
             emit(r, buf, (size_t)n, false);
-        } else if (type == 0x02) { /* data frame (shouldn't happen on AP) */
-            emit(r, buf, (size_t)n, false);
+            break;
+        case LDN_FRAME_DROP:
+            /* Not silently: an AP netdev only produces Ethernet, so anything
+             * here is a framing we did not expect, and dropping it quietly is
+             * how the 0x88B7 bug survived. */
+            warn_dropped_ap_frame(buf, (size_t)n);
+            break;
         }
     }
 }

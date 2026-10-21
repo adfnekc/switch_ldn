@@ -223,6 +223,28 @@ int ldn_build_auth_body(uint8_t *out, size_t out_len, const LdnAuthData *auth,
  *
  * Returns the total frame length, or -1 if it does not fit.
  */
+/*
+ * What kind of frame arrived on the AP interface.
+ *
+ * Extracted from radio.c's pump_ap() because getting it wrong is silent: an
+ * Ethernet LDN control frame has ethertype 0x88B7, and a test that classified
+ * it as 802.11 parsed every field at the wrong offset, so real authentication
+ * requests were dropped while everything still linked and "passed".
+ *
+ * The AP netdev's link type is Ethernet, so on real hardware everything read
+ * from it is one of the first three kinds. The 802.11 kinds exist for the
+ * --radio-socket harness and for drivers that hand up raw frames.
+ */
+typedef enum {
+    LDN_FRAME_DROP = 0,     /* too short, or nothing we relay */
+    LDN_FRAME_CONTROL,      /* Ethernet + 0x88B7 + LDN OUI: authentication etc. */
+    LDN_FRAME_ETHERNET,     /* Ethernet + IPv4/IPv6/ARP: game traffic */
+    LDN_FRAME_80211_ACTION, /* raw 802.11 action frame */
+    LDN_FRAME_80211_DATA,   /* raw 802.11 data frame */
+} LdnFrameKind;
+
+LdnFrameKind ldn_classify_ap_frame(const void *buf, size_t len);
+
 int ldn_build_ldn_ethernet(uint8_t *out, size_t out_len, const uint8_t dst[6],
                            const uint8_t src[6], const void *body,
                            size_t body_len);
