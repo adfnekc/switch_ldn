@@ -157,7 +157,7 @@ static void deliver_to_guest(Bridge *b, const uint8_t *eth, size_t len)
 
     if (b->guest) {
         /* Broadcast on the LDN mesh has to fan out to every guest. */
-        bool broadcast = (ntohl(dst_ip) & 0xFF) == 0xFF;
+        bool broadcast = (dst_ip & 0xFF) == 0xFF;
 
         RyuLdnProxyInfo info;
         memset(&info, 0, sizeof(info));
@@ -169,21 +169,18 @@ static void deliver_to_guest(Bridge *b, const uint8_t *eth, size_t len)
          * fake IPs are 192.168.x.y, so a hard-coded value sends the packet to a
          * subnet nobody is listening on. Derive it from what we handed out.
          */
-        uint32_t guest_be = b->guest_proxy_ip; /* dotted quad, big-endian in a u32 */
-        uint32_t guest_host = ntohl(guest_be);
-        uint32_t subnet = guest_host & 0xFFFF0000u;
-        info.dest_ipv4 = broadcast ? htonl(subnet | 0x0000FFFFu) : b->guest_proxy_ip;
+        uint32_t subnet = b->guest_proxy_ip & 0xFFFF0000u;
+        info.dest_ipv4 = broadcast ? (subnet | 0x0000FFFFu) : b->guest_proxy_ip;
         info.source_port = sport;
         info.dest_port = dport;
         info.protocol = 17;
 
         ryuldn_send_proxy_data(b->guest, info, udp, udp_len);
         LOG_T("radio->guest %u.%u.%u.%u:%u -> %u.%u.%u.%u:%u (%zu bytes)",
-              (ntohl(src_ip) >> 24) & 0xFF, (ntohl(src_ip) >> 16) & 0xFF,
-              (ntohl(src_ip) >> 8) & 0xFF, ntohl(src_ip) & 0xFF, sport,
-              (ntohl(info.dest_ipv4) >> 24) & 0xFF, (ntohl(info.dest_ipv4) >> 16) & 0xFF,
-              (ntohl(info.dest_ipv4) >> 8) & 0xFF, ntohl(info.dest_ipv4) & 0xFF, dport,
-              udp_len);
+              (src_ip >> 24) & 0xFF, (src_ip >> 16) & 0xFF,
+              (src_ip >> 8) & 0xFF, src_ip & 0xFF, sport,
+              (info.dest_ipv4 >> 24) & 0xFF, (info.dest_ipv4 >> 16) & 0xFF,
+              (info.dest_ipv4 >> 8) & 0xFF, info.dest_ipv4 & 0xFF, dport, udp_len);
         return;
     }
 
@@ -195,13 +192,13 @@ static void deliver_to_guest(Bridge *b, const uint8_t *eth, size_t len)
          * what ProxySocket::HandleProxyPacket matches its own local port
          * against.
          */
-        uint32_t src_host = ntohl(src_ip);
+        uint32_t src_host = src_ip;
         uint8_t local_ip[4] = {(uint8_t)(src_host >> 24), (uint8_t)(src_host >> 16),
                                (uint8_t)(src_host >> 8), (uint8_t)src_host};
-        uint32_t guest_host = ntohl(b->guest_proxy_ip);
+        uint32_t guest_host = b->guest_proxy_ip;
         uint8_t remote_ip[4] = {(uint8_t)(guest_host >> 24), (uint8_t)(guest_host >> 16),
                                 (uint8_t)(guest_host >> 8), (uint8_t)guest_host};
-        bool rbroadcast = (ntohl(dst_ip) & 0xFF) == 0xFF;
+        bool rbroadcast = (dst_ip & 0xFF) == 0xFF;
         if (room_send_proxy_packet(b->room_server, b->room_member, local_ip, sport,
                                    remote_ip, dport, rbroadcast, udp,
                                    (uint32_t)udp_len) != 0) {
@@ -266,7 +263,7 @@ static void deliver_from_guest(Bridge *b, RyuLdnProxyInfo info, const uint8_t *d
         return;
     }
 
-    uint32_t dest_host = ntohl(info.dest_ipv4);
+    uint32_t dest_host = info.dest_ipv4;
     uint8_t dst_mac[6];
     bool to_broadcast = (dest_host & 0xFF) == 0xFF;
 
@@ -437,7 +434,7 @@ static void on_access_point(RyuLdnSession *session, const uint8_t *payload, size
     uint16_t comm_version = guest->network.local_communication_version;
 
     if (b->guest_proxy_ip == 0) {
-        b->guest_proxy_ip = htonl(0x0A720001);
+        b->guest_proxy_ip = 0x0A720001;
     }
 
     if (!b->host) {
@@ -479,7 +476,7 @@ static void on_access_point(RyuLdnSession *session, const uint8_t *payload, size
      */
     RyuLdnProxyConfig cfg;
     cfg.proxy_ip = b->guest_proxy_ip;
-    cfg.proxy_subnet_mask = htonl(0xFFFF0000);
+    cfg.proxy_subnet_mask = 0xFFFF0000;
     ryuldn_send_proxy_config(session, cfg);
 
     RyuLdnNetworkInfo info;
@@ -489,8 +486,8 @@ static void on_access_point(RyuLdnSession *session, const uint8_t *payload, size
     LOG_I("%s network live for real consoles: title=%016llx channel=%u "
           "(guest proxy IP %u.%u.%u.%u)",
           is_private ? "private" : "public", (unsigned long long)title_id, channel,
-          (ntohl(b->guest_proxy_ip) >> 24) & 0xFF, (ntohl(b->guest_proxy_ip) >> 16) & 0xFF,
-          (ntohl(b->guest_proxy_ip) >> 8) & 0xFF, ntohl(b->guest_proxy_ip) & 0xFF);
+          (b->guest_proxy_ip >> 24) & 0xFF, (b->guest_proxy_ip >> 16) & 0xFF,
+          (b->guest_proxy_ip >> 8) & 0xFF, b->guest_proxy_ip & 0xFF);
 }
 
 /*
@@ -506,7 +503,7 @@ static void on_connected(RyuLdnSession *session, void *user)
 
     RyuLdnProxyConfig cfg;
     cfg.proxy_ip = b->guest_proxy_ip;
-    cfg.proxy_subnet_mask = htonl(0xFFFF0000);
+    cfg.proxy_subnet_mask = 0xFFFF0000;
     ryuldn_send_proxy_config(session, cfg);
 
     RyuLdnNetworkInfo info;
@@ -514,8 +511,8 @@ static void on_connected(RyuLdnSession *session, void *user)
     ryuldn_send_connected(session, &info);
 
     LOG_I("guest connected as node 0 (proxy IP %u.%u.%u.%u)",
-          (ntohl(b->guest_proxy_ip) >> 24) & 0xFF, (ntohl(b->guest_proxy_ip) >> 16) & 0xFF,
-          (ntohl(b->guest_proxy_ip) >> 8) & 0xFF, ntohl(b->guest_proxy_ip) & 0xFF);
+          (b->guest_proxy_ip >> 24) & 0xFF, (b->guest_proxy_ip >> 16) & 0xFF,
+          (b->guest_proxy_ip >> 8) & 0xFF, b->guest_proxy_ip & 0xFF);
 }
 
 /*
@@ -662,7 +659,7 @@ static void notify_station_changed(Bridge *b, const HostEvent *ev)
          * local_ip is the joining node's own address from the room member's
          * point of view; yuzu pushes it straight onto connected_clients.
          */
-        uint32_t st_host = ntohl(st.ipv4);
+        uint32_t st_host = st.ipv4;
         uint8_t st_ip[4] = {(uint8_t)(st_host >> 24), (uint8_t)(st_host >> 16),
                             (uint8_t)(st_host >> 8), (uint8_t)st_host};
         room_send_ldn_packet(b->room_server, b->room_member, type, st_ip, st_ip, false,
@@ -704,7 +701,7 @@ static void room_on_join(RoomServer *server, const RoomMemberInfo *member, void 
     uint32_t ip = ((uint32_t)member->fake_ip[0] << 24) |
                  ((uint32_t)member->fake_ip[1] << 16) |
                  ((uint32_t)member->fake_ip[2] << 8) | (uint32_t)member->fake_ip[3];
-    b->guest_proxy_ip = htonl(ip);
+    b->guest_proxy_ip = ip;
 
     /* The room list is what the game's UI reads. */
     room_broadcast_information(server);
@@ -860,7 +857,7 @@ static void room_on_packet(RoomServer *server, int member_id, const RoomPacketIn
         info.source_ipv4 = rd_be32(pkt->local_ip);
         info.source_port = pkt->local_port;
         info.dest_ipv4 = pkt->remote_ip[0] == 0xFF && pkt->remote_ip[3] == 0xFF
-                             ? htonl(0xFFFFFFFFu)
+                             ? 0xFFFFFFFFu
                              : rd_be32(pkt->remote_ip);
         info.dest_port = pkt->remote_port;
         info.protocol = pkt->protocol;
@@ -1158,7 +1155,7 @@ int main(int argc, char **argv)
     bridge.prodkeys = &prodkeys;
     bridge.channel = channel;
     bridge.band = band;
-    bridge.guest_proxy_ip = htonl(0x0A720001); /* 10.114.0.1 */
+    bridge.guest_proxy_ip = 0x0A720001; /* 10.114.0.1, plain number */
 
     Bridge *b = &bridge;
 

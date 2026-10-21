@@ -78,8 +78,8 @@ static void rng_fill(uint8_t *buf, size_t len)
  */
 static uint32_t alloc_station_ip(const Host *host, int index)
 {
-    return htonl((169u << 24) | (254u << 16) |
-                 ((uint32_t)host->pub.host_ip_octet_x << 8) | (uint32_t)(index + 2));
+    return (169u << 24) | (254u << 16) |
+           ((uint32_t)host->pub.host_ip_octet_x << 8) | (uint32_t)(index + 2);
 }
 
 int host_station_index_by_mac(const Host *host, const uint8_t mac[6])
@@ -160,8 +160,8 @@ static int host_configure(Host *host, uint64_t title_id, uint16_t channel,
     self->associated = true;
     self->ldn_joined = true;
     self->platform = LDN_PLATFORM_SWITCH;
-    self->ipv4 = htonl((169u << 24) | (254u << 16) |
-                       ((uint32_t)host->pub.host_ip_octet_x << 8) | 1u);
+    self->ipv4 = (169u << 24) | (254u << 16) |
+                 ((uint32_t)host->pub.host_ip_octet_x << 8) | 1u;
     snprintf(self->username, sizeof(self->username), "%s",
              host_username && *host_username ? host_username : "switch_ldn");
     self->app_communication_version = app_comm_version;

@@ -118,9 +118,24 @@ advertisement decrypts with a key we derived ourselves
 decrypted payload hashes to the advertised SHA-256
 AuthenticationRequest sent
 AuthenticationResponse status is SUCCESS / marked as a response / echoes our session_info
+bridge published an address for us in its advertisement
+assigned address is in 169.254.0.0/16
 Pia frame sent upstream as a data frame
+
+a frame from the emulator reached the console        <- downlink
+downlink frame is IPv4/UDP / addressing is right / payload is intact
+
 ProxyData received from a real console / payload is intact
+ProxyData source is the console's LDN address
+ProxyData destination is the emulator's proxy address
+ProxyData protocol is UDP (17)
 ```
+
+The downlink stages exist because the bridge's emulator-to-console direction had
+never been exercised end to end, and it was byte-swapping an address. They only
+work because the fake console now reads its own IPv4 out of the advertisement's
+participant list instead of hard-coding one: the host assigns that address, and
+a test that invents it is testing itself.
 
 ## What interop cannot cover
 

@@ -71,6 +71,9 @@ ADV_SESSION_INFO = 0x00
 ADV_NONCE = 0x24
 ADV_SHA256 = 0x28
 ADV_DATA = 0x48
+ADV_OFF_PARTICIPANTS = 0x18      # inside the decrypted advertise data
+ADV_NODE_COUNT = 0x17
+PARTICIPANT_SIZE = 56
 
 PACKET_ADVERTISEMENT = 257
 PACKET_AUTHENTICATION = 258
@@ -287,6 +290,15 @@ class FakeConsole:
             if self.verbose:
                 print("  <ethernet LDN control>", flush=True)
             return data[14:]
+        # Downlink game traffic arrives as Ethernet with ethertype 0x0800. The
+        # callers above only care about LDN control, so stash it rather than
+        # dropping it: this is the only thing that exercises the bridge's
+        # emulator -> console direction.
+        if len(data) >= 14 and struct.unpack(">H", data[12:14])[0] == 0x0800:
+            self.last_pia = data[14:]
+            if self.verbose:
+                print(f"  <ethernet IPv4 downlink {len(data) - 14}B>", flush=True)
+            return None
         if len(data) < IEEE80211_HDRLEN:
             return None
         # addr1 is the destination (+4), addr2 the transmitter (+10) - the
@@ -310,6 +322,49 @@ class FakeConsole:
                       flush=True)
             if is_ldn_body(body) and body_type(body) == PACKET_ADVERTISEMENT:
                 return body
+        return None
+
+    def decrypt_advertisement(self, body):
+        """Decrypt an advertisement body to (session_info, plain_tail).
+
+        plain_tail[0] is payload offset 0x28 (the hash field), so the advertise
+        data itself starts at plain_tail[ADV_DATA - ADV_SHA256]."""
+        payload = body_payload(body)
+        session_info = payload[ADV_SESSION_INFO:ADV_SESSION_INFO + 32]
+        nonce = payload[ADV_NONCE:ADV_NONCE + 4]
+        key = derive_advertise_key(self.keys, session_info)
+        plain_tail = aes128_ctr_xor(key, nonce + b"\x00" * 12,
+                                    payload[ADV_SHA256:])
+        return session_info, plain_tail
+
+    def learn_own_ip(self, timeout=6.0):
+        """Find our own node entry in a later advertisement and take its IPv4.
+
+        A real console does not invent its LDN address: the host assigns it and
+        publishes it in the advertisement's participant list. Hard-coding one
+        (as this test used to) means the bridge is right and the test is wrong,
+        which is exactly what happened - the station was 169.254.1.3 while the
+        fake console claimed 169.254.3.1, so the downlink lookup could not match
+        it.
+        """
+        base = ADV_DATA - ADV_SHA256
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            body = self.wait_advertisement(
+                timeout=max(0.05, deadline - time.monotonic()))
+            if body is None:
+                continue
+            _, plain = self.decrypt_advertisement(body)
+            if len(plain) < base + ADV_OFF_PARTICIPANTS:
+                continue
+            count = plain[base + ADV_NODE_COUNT]
+            for i in range(min(count, 8)):
+                off = base + ADV_OFF_PARTICIPANTS + i * PARTICIPANT_SIZE
+                if off + 10 > len(plain):
+                    break
+                if plain[off + 4:off + 10] == self.mac:
+                    ip = plain[off:off + 4]
+                    return ".".join(str(b) for b in ip)
         return None
 
     def check_advertisement(self, body):
@@ -395,9 +450,11 @@ class FakeConsole:
         # follow here pushed the UDP header four bytes along, so the bridge read
         # the length and checksum fields as the ports.
         ip = struct.pack(">BBHHHBBH", 0x45, 0, 20 + 8 + len(pia), 0, 0, 64, 17, 0)
-        # Source is the LDN IP the bridge assigned us when we authenticated
-        # (169.254.x.y); destination is the LDN IP it published for the guest.
-        ip += bytes.fromhex("A9FE0301") + bytes.fromhex("0A720001")
+        # Source is the LDN IP the bridge assigned us, read back out of its own
+        # advertisement; destination is the LDN IP it published for the guest.
+        assert self.my_ip is not None, "no assigned IP"
+        src_ip = bytes(int(x) for x in self.my_ip.split("."))
+        ip += src_ip + bytes.fromhex("0A720001")
         ip += udp
         # Pia traffic reaches the AP interface as an Ethernet frame with
         # ethertype 0x0800 - hostapd bridges it - so send that shape.
@@ -405,6 +462,42 @@ class FakeConsole:
         self.sock.sendto(eth, self.path)
         stage("Pia frame sent upstream as a data frame", True,
               "{}-byte IP packet".format(len(ip)))
+
+    def expect_downlink(self, timeout=8.0):
+        """Wait for the emulator's reply, which is the downlink direction.
+
+        The bridge has to find the station by IPv4 and build a UDP frame for it.
+        Until this stage existed, nothing tested that at all, and it was broken.
+        """
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline and self.last_pia is None:
+            self.receive(timeout=max(0.05, deadline - time.monotonic()))
+
+        if self.last_pia is None:
+            stage("a frame from the emulator reached the console", False,
+                  "nothing arrived in %.0f s" % timeout)
+            return
+
+        ip = self.last_pia
+        if len(ip) < 28:
+            stage("a frame from the emulator reached the console", False,
+                  "%d-byte IP packet is too short" % len(ip))
+            return
+        stage("a frame from the emulator reached the console", True,
+              "%d-byte IP packet" % len(ip))
+
+        ihl = (ip[0] & 0x0F) * 4
+        stage("downlink frame is IPv4/UDP", ip[0] >> 4 == 4 and ip[9] == 17,
+              "version=%d proto=%d" % (ip[0] >> 4, ip[9]))
+        src = ".".join(str(b) for b in ip[12:16])
+        dst = ".".join(str(b) for b in ip[16:20])
+        sport, dport, ulen = struct.unpack(">HHH", ip[ihl:ihl + 6])
+        stage("downlink addressing is right",
+              dst == self.my_ip and dport == 40000 and sport == 30000,
+              "%s:%u -> %s:%u" % (src, sport, dst, dport))
+        payload = ip[ihl + 8:ihl + ulen]
+        stage("downlink payload is intact",
+              payload == b"switch_ldn_downlink", repr(payload[:32]))
 
     def handshake_socket(self):
         """
@@ -424,6 +517,8 @@ class FakeConsole:
 
     def run(self):
         self.keys = parse_prod_keys(self.prodkeys)
+        self.last_pia = None
+        self.my_ip = None
         stage("attached to the bridge's radio socket", True, self.path)
         self.handshake_socket()
 
@@ -439,7 +534,18 @@ class FakeConsole:
         server_random = cand
         resp = self.authenticate(session_info, server_random)
         self.check_auth_response(resp)
+        self.my_ip = self.learn_own_ip()
+        stage("bridge published an address for us in its advertisement",
+              self.my_ip is not None, self.my_ip or "no node entry with our MAC")
+        # ...and that address has to be in the LDN link-local range. Without
+        # this, a byte-swapped address propagates consistently: the bridge
+        # advertises 3.1.254.169, we believe it, we send from it, the bridge
+        # matches it, and every later stage passes on a nonsense address.
+        stage("assigned address is in 169.254.0.0/16",
+              self.my_ip is not None and self.my_ip.startswith("169.254."),
+              self.my_ip or "-")
         self.send_pia()
+        self.expect_downlink()
 
 
 def main():

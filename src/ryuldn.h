@@ -184,6 +184,18 @@ typedef struct __attribute__((packed)) {
  * WARNING: the fields are interleaved (ip, port, ip, port, proto), NOT grouped
  * by kind. Both layouts total 16 bytes so a size assertion cannot catch this,
  * but getting it wrong routes every game packet to the wrong address.
+ *
+ * WARNING: the two address fields are *plain numbers*, not network byte order.
+ * Ryujinx's LdnProxy.GetIpV4() reverses the address bytes and runs
+ * BitConverter.ToUInt32() on them, so 169.254.3.1 becomes 0xA9FE0301 and the
+ * struct is blitted as-is: on x86 that is little-endian on the wire.
+ * GetEndpoint() is the exact inverse. Converting these with htonl()/ntohl()
+ * therefore swaps them - which shipped once, in one field only, and made the
+ * downlink unable to match a station by address.
+ *
+ * The relay's own addresses (Bridge::guest_proxy_ip, HostStation::ipv4) follow
+ * the same convention: a plain number. Use rd_be32()/wr_be32() only when
+ * reading or writing an actual IP header.
  */
 typedef struct __attribute__((packed)) {
     uint32_t source_ipv4;  /* 0x00 */

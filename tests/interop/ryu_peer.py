@@ -55,6 +55,29 @@ def decode_proxy(body):
                                             bytes(body[20:]))
 
 g_proxy = None  # the last ProxyData we decoded, so the caller can assert on it
+SEND_PROXY = "--send-proxy" in _sys.argv[1:]
+REPLIED = False
+DOWNLINK_MARKER = b"switch_ldn_downlink"  # what the console must receive back
+
+
+def send_proxy_reply(si, sp):
+    """Answer the console's Pia frame, the way an emulator would.
+
+    This is the only end-to-end coverage of the bridge's *downlink*: the console
+    sends a frame, we send one back to the address it came from, and the bridge
+    has to look the station up by IPv4 and build a UDP frame for it. That path
+    shipped broken - deliver_from_guest() byte-swapped the address - and no test
+    noticed, because every test until now only checked the uplink.
+    """
+    global REPLIED
+    if REPLIED:
+        return
+    REPLIED = True
+    info = struct.pack("<IHIHI", 0x0A720001, 30000, si, sp, 17)
+    body = info + struct.pack("<I", len(DOWNLINK_MARKER)) + DOWNLINK_MARKER
+    s.sendall(frame(20, body))  # PacketId.ProxyData
+    print(">>> ProxyData reply %s:%u -> %s:%u (%d bytes)" % (
+        ip_str(0x0A720001), 30000, ip_str(si), sp, len(DOWNLINK_MARKER)))
 
 
 def recv_one(timeout=2):
@@ -76,6 +99,8 @@ def recv_one(timeout=2):
                   ip_str(si), sp, ip_str(di), dp, proto, dlen))
             if dlen <= 64:
                 print("    " + payload.hex())
+            if SEND_PROXY:
+                send_proxy_reply(si, sp)
     elif sz<=256: print("    "+full[-sz:].hex() if sz else "")
     else: print("    "+full[12:64].hex()+"...")
     return ptype,full
@@ -143,12 +168,25 @@ if "--expect-proxy" in _sys.argv[1:]:
     # A real console's Pia traffic reaches us as ProxyData; the frame can
     # arrive during the handshake or after it.
     got = g_proxy or wait_for_proxy()
+    if got is not None and SEND_PROXY:
+        send_proxy_reply(got[0], got[1])
     if got is not None:
         si, sp, di, dp, proto, dlen, payload = got
         stage("ProxyData received from a real console", True,
               "{}:{} -> {}:{}".format(ip_str(si), sp, ip_str(di), dp))
         stage("ProxyData payload is intact", len(payload) == dlen and dlen > 0,
               "{} bytes".format(dlen))
+        # Addresses, not just presence. Both fields are the plain numeric IPv4
+        # value (Ryujinx's GetIpV4 reverses the bytes and then BitConverter's
+        # them), so a byte-swapped field decodes to a different address rather
+        # than failing - which is exactly how a swapped dest_ipv4 looked fine
+        # and printed "1.0.114.10" until it was asserted.
+        stage("ProxyData source is the console's LDN address",
+              (si >> 24) == 169 and (si >> 16) & 0xFF == 254,
+              ip_str(si))
+        stage("ProxyData destination is the emulator's proxy address",
+              di == 0x0A720001, ip_str(di))
+        stage("ProxyData protocol is UDP (17)", proto == 17, str(proto))
     else:
         stage("ProxyData received from a real console", False, "none arrived")
     # In this mode the answer is the point, so do not then sit in the hold loop

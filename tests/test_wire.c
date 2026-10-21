@@ -156,6 +156,73 @@ int main(void)
         assert(guest.advertise_data_size + 0xBC == 0xC4);
     }
 
+    /*
+     * --- ProxyInfo addresses are plain numbers, and blitted little-endian ---
+     *
+     * Ryujinx's LdnProxy.GetIpV4() is Reverse(address bytes) then
+     * BitConverter.ToUInt32(), so 169.254.3.1 is stored as 0xA9FE0301 and the
+     * Pack=1 struct is memcpy'd straight onto the wire. GetEndpoint() is the
+     * inverse. Getting this wrong does not fail - it silently sends every
+     * packet to a different address.
+     *
+     * The bug this pins: the two address fields disagreed. source_ipv4 held
+     * the number and dest_ipv4 held an htonl()'d one, so no peer could read
+     * both correctly, and deliver_from_guest()'s station lookup could never
+     * match a unicast address (broadcast worked, because 0xFFFFFFFF swaps to
+     * itself - which is why the mistake stayed hidden).
+     */
+    {
+        RyuLdnProxyInfo info;
+        memset(&info, 0, sizeof(info));
+        info.source_ipv4 = 0xA9FE0301; /* 169.254.3.1 */
+        info.source_port = 40000;
+        info.dest_ipv4 = 0x0A720001;   /* 10.114.0.1 */
+        info.dest_port = 30000;
+        info.protocol = 17;
+
+        /* Blit it the way ryuldn_send_proxy_data() does. */
+        uint8_t wire[sizeof(info)];
+        memcpy(wire, &info, sizeof(info));
+
+        /* source_ipv4 occupies 0x00..0x03, little-endian. */
+        assert(wire[0] == 0x01 && wire[1] == 0x03 &&
+               wire[2] == 0xFE && wire[3] == 0xA9);
+        /* dest_ipv4 is at 0x06 (interleaved!), also little-endian. Reading it
+         * back as a number must give the same address, not a swapped one. */
+        uint32_t dest;
+        memcpy(&dest, wire + 0x06, 4);
+        assert(dest == 0x0A720001);
+        assert(wire[6] == 0x01 && wire[7] == 0x00 &&
+               wire[8] == 0x72 && wire[9] == 0x0A);
+
+        /* The two address fields must agree on byte order. Whatever the order
+         * is, blitting and reading back must be lossless for both. */
+        uint32_t src;
+        memcpy(&src, wire + 0x00, 4);
+        assert(src == info.source_ipv4);
+
+        /* And the numeric value must survive the IP-header round trip:
+         * rd_be32 reads the wire bytes of an IPv4 header into exactly this
+         * number. */
+        uint8_t iphdr[20];
+        memset(iphdr, 0, sizeof(iphdr));
+        iphdr[12] = 169; iphdr[13] = 254; iphdr[14] = 3; iphdr[15] = 1;
+        assert(rd_be32(iphdr + 12) == 0xA9FE0301);
+        uint8_t out[20];
+        wr_be32(out + 12, 0xA9FE0301);
+        assert(memcmp(out + 12, iphdr + 12, 4) == 0);
+
+        /* The broadcast address Ryujinx derives: ProxyIp | ~ProxySubnetMask.
+         * With a wrong-width subnet mask this is nonsense, and Ryujinx uses it
+         * to decide what to broadcast - so it is worth pinning. */
+        uint32_t proxy_ip = 0x0A720001, mask = 0xFFFF0000;
+        assert((proxy_ip | ~mask) == 0x0A72FFFF);
+
+        /* The bridge's own derivation must agree with that. */
+        uint32_t subnet = proxy_ip & 0xFFFF0000u;
+        assert((subnet | 0x0000FFFFu) == 0x0A72FFFF);
+    }
+
     printf("all wire-format tests passed\n");
     return 0;
 }
