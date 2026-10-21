@@ -5,8 +5,13 @@
 1. **桥不挑模拟器，但同时只监听两个端口**——Ryubing 连 30456，Eden 连 24872，
    两边可以同时在线。
 2. **真机永远是被动方**：你（或朋友）在模拟器里建房间，真机本地无线里就能看到。
-3. **桥只需要 `--prodkeys` 一个参数**。密语、title id、版本号全部由模拟器里的
+3. **桥只需要一个 prod.keys 文件**。密语、title id、版本号全部由模拟器里的
    游戏自己提供。
+   `--prodkeys` 可以省略：会依次找 `./prod.keys`、`~/.config/switch_ldn/prod.keys`、
+   `~/.switch/prod.keys`。用哪台机器的 prod.keys 都一样——桥只读
+   `master_key_00`、`aes_kek_generation_source`、`aes_key_generation_source`
+   三个**公共**密钥，所有 Switch 上它们都相同（这也正是别人的房间你能收到、
+   你的房间别人能收到的原因）。
 
 ---
 

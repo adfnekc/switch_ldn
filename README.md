@@ -131,7 +131,11 @@ sudo ./switch_ldn --ap-iface wlan0 \
     --channel 1 --prodkeys prod.keys
 ```
 
-`--prodkeys` is the only thing the bridge needs from you. See
+`--prodkeys` is the only thing the bridge needs from you, and it is optional if
+the file is in `./prod.keys`, `~/.config/switch_ldn/prod.keys` or
+`~/.switch/prod.keys` — those are searched in that order. Any console's modern
+prod.keys works: the three common keys the bridge reads are identical on every
+Switch, which is why one console can decrypt another's LDN advertisement. See
 [USAGE.md](USAGE.md) for scenarios, the passphrase question and failure modes.
 
 ## What is left

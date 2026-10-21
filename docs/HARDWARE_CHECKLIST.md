@@ -16,8 +16,11 @@ Prerequisites, all of which you must have before stage 1:
   needs, so plan on building the out-of-tree one.
 - root on the same machine
 - a real Switch **with local wireless play** in a supported game
-- `prod.keys` from that same console (the bridge needs `--prodkeys`; nothing
-  else about the console is required, and it does not need to be modified)
+- `prod.keys` (any modern one; the three common keys the bridge reads are the
+  same on every console, so this does not have to come from the console you are
+  testing with — nothing about that console is required and it does not need to
+  be modified). Either pass `--prodkeys` or drop the file in `./prod.keys` /
+  `~/.config/switch_ldn/prod.keys` / `~/.switch/prod.keys`.
 - the emulator, Ryubing first — it needs no patch and exercises the RyuLdn
   path that has the least moving parts
 

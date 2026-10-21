@@ -86,9 +86,25 @@ check: $(BIN)
 	    echo "ERROR: selfcheck on a missing interface exited 0"; exit 1; \
 	else echo "correctly nonzero"; fi
 	@echo "--- live mode must refuse to start without --ap-iface ---"
-	@if ./$(BIN) --prodkeys /dev/null >/dev/null 2>&1; then \
+	@if ./$(BIN) --prodkeys tests/interop/prod.keys >/dev/null 2>&1; then \
 	    echo "ERROR: should have failed"; exit 1; \
 	else echo "correctly refused"; fi
+	@echo "--- prod.keys is found in the default location, no flag needed ---"
+	@h=$$(mktemp -d); mkdir -p $$h/.config/switch_ldn; \
+	cp tests/interop/prod.keys $$h/.config/switch_ldn/prod.keys; \
+	if HOME=$$h timeout 3 ./$(BIN) --radio-socket /tmp/check-keys.sock 2>&1 \
+	    | grep -q "using prod.keys from $$h/.config/switch_ldn/prod.keys"; then \
+	    echo "found it"; else echo "ERROR: default lookup did not find prod.keys"; rm -rf $$h /tmp/check-keys.sock; exit 1; fi; \
+	rm -rf $$h /tmp/check-keys.sock*
+	@echo "--- a missing prod.keys must name the paths it tried ---"
+	@h=$$(mktemp -d); \
+	if HOME=$$h ./$(BIN) --radio-socket /tmp/check-nokeys.sock >$$h/out 2>&1; then \
+	    echo "ERROR: started without any prod.keys"; rm -rf $$h; exit 1; \
+	fi; \
+	for p in prod.keys .config/switch_ldn/prod.keys .switch/prod.keys; do \
+	    grep -q "$$p" $$h/out || { echo "ERROR: error message omits $$p"; cat $$h/out; rm -rf $$h; exit 1; }; \
+	done; \
+	echo "named all three"; rm -rf $$h /tmp/check-nokeys.sock*
 	@echo "--- removed options must stay removed ---"
 	@for opt in --passphrase-hex --title-id --dump-adv --only; do \
 	    if ./$(BIN) $$opt x --help 2>&1 | grep -q "unrecognized option"; then \

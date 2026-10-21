@@ -26,6 +26,7 @@
 
 #include <arpa/inet.h>
 #include <getopt.h>
+#include <limits.h>
 #include <netinet/if_ether.h>
 #include <signal.h>
 #include <unistd.h>
@@ -987,7 +988,9 @@ static const char *k_usage =
     "  --channel <n>          LDN channel: 1/6/11 (2.4G) or 36-48 (5G).\n"
     "                         Used as the default until the game picks one.\n"
     "  --band <2|5>           band, default 2\n"
-    "  --prodkeys <file>      prod.keys from your console (required)\n"
+    "  --prodkeys <file>      prod.keys (default: ./prod.keys, then\n"
+    "                         ~/.config/switch_ldn/prod.keys,\n"
+    "                         then ~/.switch/prod.keys)\n"
     "  --bind <addr>          bind address for both protocols (default 127.0.0.1)\n"
     "  --port <n>             RyuLdn port (default 30456) - Ryubing/Ryujinx\n"
     "  --room-port <n>        Room port (default 24872) - Eden/yuzu\n"
@@ -1001,6 +1004,64 @@ static void on_signal(int sig)
 {
     (void)sig;
     g_stop = 1;
+}
+
+/*
+ * Where prod.keys comes from when --prodkeys is not given.
+ *
+ * The three values the bridge actually needs out of that file - master_key_00,
+ * aes_kek_generation_source, aes_key_generation_source - are the *common*
+ * console keys: every Switch has the same ones, which is exactly why one
+ * console can decrypt another console's LDN advertisement. So "which file"
+ * does not matter, only that it is a real one; a file dumped from a different
+ * console works just as well as your own.
+ *
+ * Hence: look in the obvious places instead of demanding the flag every time.
+ * If none of them exist, say which ones were tried - a bare "needs --prodkeys"
+ * sends people looking for a flag they already know about.
+ */
+static int find_prodkeys(const char *explicit_path, char *out, size_t cap)
+{
+    if (explicit_path) {
+        snprintf(out, cap, "%s", explicit_path);
+        return 0;
+    }
+
+    const char *home = getenv("HOME");
+    const char *xdg = getenv("XDG_CONFIG_HOME");
+    char cand[4][PATH_MAX];
+    size_t n = 0;
+
+    /* A checkout or a working directory with prod.keys beside the binary. */
+    if (snprintf(cand[n], PATH_MAX, "prod.keys") > 0) {
+        n++;
+    }
+    /* XDG first if set, so $XDG_CONFIG_HOME overrides the ~/.config default. */
+    if (xdg && *xdg && snprintf(cand[n], PATH_MAX, "%s/switch_ldn/prod.keys", xdg) > 0) {
+        n++;
+    } else if (home && *home &&
+               snprintf(cand[n], PATH_MAX, "%s/.config/switch_ldn/prod.keys", home) > 0) {
+        n++;
+    }
+    if (home && *home && snprintf(cand[n], PATH_MAX, "%s/.switch/prod.keys", home) > 0) {
+        n++;
+    }
+
+    for (size_t i = 0; i < n; i++) {
+        if (access(cand[i], R_OK) == 0) {
+            snprintf(out, cap, "%s", cand[i]);
+            LOG_I("using prod.keys from %s", cand[i]);
+            return 0;
+        }
+    }
+
+    LOG_E("prod.keys not found. Pass --prodkeys <file>, or put one in:");
+    for (size_t i = 0; i < n; i++) {
+        LOG_E("  %s", cand[i]);
+    }
+    LOG_E("Only three common keys are read: master_key_00,");
+    LOG_E("aes_kek_generation_source and aes_key_generation_source.");
+    return -1;
 }
 
 int main(int argc, char **argv)
@@ -1068,10 +1129,12 @@ int main(int argc, char **argv)
     ProdKeys prodkeys;
     memset(&prodkeys, 0, sizeof(prodkeys));
 
-    if (prodkeys_path) {
-        if (prodkeys_load(&prodkeys, prodkeys_path) != 0) {
-            return 1;
-        }
+    char prodkeys_used[PATH_MAX];
+    if (find_prodkeys(prodkeys_path, prodkeys_used, sizeof(prodkeys_used)) != 0) {
+        return 1;
+    }
+    if (prodkeys_load(&prodkeys, prodkeys_used) != 0) {
+        return 1;
     }
 
     /* ---------------- live mode ---------------- */
@@ -1092,7 +1155,7 @@ int main(int argc, char **argv)
 
     Bridge bridge;
     memset(&bridge, 0, sizeof(bridge));
-    bridge.prodkeys = prodkeys_path ? &prodkeys : NULL;
+    bridge.prodkeys = &prodkeys;
     bridge.channel = channel;
     bridge.band = band;
     bridge.guest_proxy_ip = htonl(0x0A720001); /* 10.114.0.1 */
@@ -1176,11 +1239,6 @@ int main(int argc, char **argv)
      * CreateNetwork: that call carries the passphrase, the title id and the
      * local communication version. All we need up front is prod.keys.
      */
-    if (!prodkeys_path) {
-        LOG_E("live mode needs --prodkeys (see --help)");
-        return 1;
-    }
-
     LOG_I("bridge running: RyuLdn on %s:%u, Room on %s:%u, hostapd on '%s'",
           bind_addr, port, bind_addr, room_port, ap_iface);
     LOG_I("  Ryubing/Ryujinx -> Multiplayer > LDN > Mode: RyuLDN, server %s:%u",
