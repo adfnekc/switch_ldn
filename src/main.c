@@ -1131,8 +1131,12 @@ int main(int argc, char **argv)
         strncpy(rcfg.radio_socket, radio_socket, sizeof(rcfg.radio_socket) - 1);
         if (ap_iface) {
             strncpy(rcfg.ap_iface, ap_iface, sizeof(rcfg.ap_iface) - 1);
-            strncpy(rcfg.mon_iface, mon_iface ? mon_iface : ap_iface,
-                    sizeof(rcfg.mon_iface) - 1);
+            /* No default: an empty monitor interface selects the nl80211
+             * injection path, which is what the RTL8812AU needs. Only an
+             * explicit --mon-iface asks for the AF_PACKET monitor. */
+            if (mon_iface) {
+                strncpy(rcfg.mon_iface, mon_iface, sizeof(rcfg.mon_iface) - 1);
+            }
             if (radio_get_hwaddr(ap_iface, rcfg.mac) != 0) {
                 LOG_E("cannot read MAC of %s", ap_iface);
                 return 1;
@@ -1146,8 +1150,9 @@ int main(int argc, char **argv)
               rcfg.mac[5]);
     } else {
         strncpy(rcfg.ap_iface, ap_iface, sizeof(rcfg.ap_iface) - 1);
-        strncpy(rcfg.mon_iface, mon_iface ? mon_iface : ap_iface,
-                sizeof(rcfg.mon_iface) - 1);
+        if (mon_iface) {
+            strncpy(rcfg.mon_iface, mon_iface, sizeof(rcfg.mon_iface) - 1);
+        }
         if (radio_get_hwaddr(ap_iface, rcfg.mac) != 0) {
             LOG_E("cannot read MAC of %s", ap_iface);
             return 1;

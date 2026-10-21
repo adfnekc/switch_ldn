@@ -511,7 +511,7 @@ bool host_handle_frame(Host *host, Radio *radio, const RadioFrame *frame)
         return false;
     }
 
-    uint16_t fc = rd_be16(frame->frame);
+    uint16_t fc = rd_le16(frame->frame); /* 802.11 header is little-endian */
     uint8_t type = (uint8_t)((fc >> 2) & 0x3);
     uint8_t subtype = (uint8_t)((fc >> 4) & 0xF);
     (void)type;

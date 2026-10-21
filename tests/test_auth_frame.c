@@ -47,6 +47,18 @@ int main(void)
         return 1;
     }
 
+    /*
+     * --- 802.11 frame control is LITTLE-endian ---
+     *
+     * It is written with wr_le16(out + 0, 0x0008), so byte 0 is 0x08. Writing
+     * it big-endian put 00 08 on the wire, which the kernel reads as
+     * type/subtype 0x0800 - not a management frame - and rejects with -EINVAL.
+     * Nothing on our own side noticed, because the receive path used the same
+     * wrong byte order; only a real NIC found it. Pin the two bytes so it
+     * cannot come back.
+     */
+    assert(out[0] == 0x08 && out[1] == 0x00);
+
     const uint8_t *body = out + IEEE80211_HDRLEN;
 
     /* --- body prefix: OUI, packet type 258, pad --- */

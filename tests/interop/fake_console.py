@@ -154,10 +154,11 @@ def build_80211(src_mac, dst_mac, subtype_action=True):
     """A minimal 802.11 header. emit() reads addr1 (+4) as the destination and
     addr2 (+10) as the source, so both must be right."""
     fc = 0x00D0 if subtype_action else 0x0008  # action / data frame
-    hdr = struct.pack(">HH", fc, 0)
+    # 802.11 header fields are little-endian; the bridge writes them that way now.
+    hdr = struct.pack("<HH", fc, 0)
     hdr += dst_mac + src_mac
     hdr += b"\x00" * 6  # addr3
-    hdr += struct.pack(">H", 0)  # sequence
+    hdr += struct.pack("<H", 0)  # sequence
     return hdr
 
 

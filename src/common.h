@@ -67,6 +67,11 @@ static inline uint64_t rd_be64(const uint8_t *p)
     return ((uint64_t)rd_be32(p) << 32) | rd_be32(p + 4);
 }
 
+static inline uint16_t rd_le16(const uint8_t *p)
+{
+    return (uint16_t)(p[0] | (p[1] << 8));
+}
+
 static inline void wr_le16(uint8_t *p, uint16_t v)
 {
     p[0] = (uint8_t)(v & 0xFF);

@@ -55,6 +55,11 @@ int main(void)
         &keys, 1, nonce, NULL);
     expect("advertisement builds", n > 0);
 
+    /* Action frame: 0x00D0 little-endian, i.e. d0 00 on the wire. Big-endian
+     * here is invisible to every software-side test and fatal on hardware. */
+    expect("advertisement frame control is little-endian",
+           frame[0] == 0xD0 && frame[1] == 0x00);
+
     const uint8_t *payload = frame + IEEE80211_HDRLEN + LDN_ACTION_BODY_PREFIX_SIZE;
     size_t payload_len = (size_t)n - IEEE80211_HDRLEN - LDN_ACTION_BODY_PREFIX_SIZE;
     expect("payload is the full 0x548",

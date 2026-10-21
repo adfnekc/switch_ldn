@@ -298,7 +298,7 @@ static uint16_t get_fc(const uint8_t *p, size_t len)
     if (len < 2) {
         return 0;
     }
-    return rd_be16(p);
+    return rd_le16(p); /* 802.11 header fields are little-endian */
 }
 
 static bool is_ldn_action(const uint8_t *p, size_t len)

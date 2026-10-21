@@ -160,8 +160,15 @@ int ldn_build_advertisement_action_frame(uint8_t *out, size_t out_len,
 
     /* --- 802.11 header -------------------------------------------------- */
     memset(out, 0, IEEE80211_HDRLEN);
-    wr_be16(out + 0, 0x00D0); /* management, action */
-    wr_be16(out + 2, 0x0000); /* duration */
+    /*
+     * 802.11 header fields are LITTLE-endian. Writing the frame control with
+     * wr_be16 produced 00 d0 instead of d0 00, so the kernel read the frame as
+     * type/subtype 0xd000 and rejected the whole thing with -EINVAL. Everything
+     * on our side agreed with itself, because the receive path used the same
+     * byte order, which is why only real hardware could show it.
+     */
+    wr_le16(out + 0, 0x00D0); /* management, action */
+    wr_le16(out + 2, 0x0000); /* duration */
     memset(out + 4, 0xFF, 6); /* addr1 = broadcast */
     memcpy(out + 10, mac, 6); /* addr2 = BSSID (us) */
     memcpy(out + 16, mac, 6); /* addr3 */
@@ -244,12 +251,12 @@ int ldn_build_auth_frame(uint8_t *out, size_t out_len, const uint8_t mac[6],
 
     memset(out, 0, need);
 
-    wr_be16(out + 0, 0x0008); /* data frame, QoS-less */
-    wr_be16(out + 2, 0);
+    wr_le16(out + 0, 0x0008); /* data frame, QoS-less (802.11 is little-endian) */
+    wr_le16(out + 2, 0);
     memcpy(out + 4, bssid, 6);   /* addr1 = BSSID */
     memcpy(out + 10, mac, 6);    /* addr2 = source */
     memcpy(out + 16, bssid, 6);  /* addr3 */
-    wr_be16(out + 22, 0);        /* seq */
+    wr_le16(out + 22, 0);        /* seq, little-endian */
 
     uint8_t *body = out + IEEE80211_HDRLEN;
     build_88b7_header(body, LDN_PACKET_AUTHENTICATION);
