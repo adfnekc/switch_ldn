@@ -293,6 +293,69 @@ int ldn_build_auth_body(uint8_t *out, size_t out_len, const LdnAuthData *auth,
     return (int)need;
 }
 
+LdnFrameDiag ldn_diagnose_ethernet(const void *eth, size_t len)
+{
+    const uint8_t *p = eth;
+    const size_t eth_len = 14;
+
+    if (len < eth_len) {
+        return LDN_DIAG_TRUNCATED;
+    }
+
+    uint16_t etype = rd_be16(p + 12);
+    if (etype == 0x0806) {
+        return LDN_DIAG_ARP;
+    }
+    if (etype == 0x86DD) {
+        return LDN_DIAG_IPV6;
+    }
+    if (etype != 0x0800) {
+        return LDN_DIAG_OTHER;
+    }
+
+    if (len < eth_len + 20) {
+        return LDN_DIAG_TRUNCATED;
+    }
+    const uint8_t *ip = p + eth_len;
+    if ((ip[0] >> 4) != 4) {
+        return LDN_DIAG_NOT_IPV4;
+    }
+    size_t ihl = (size_t)(ip[0] & 0x0F) * 4;
+    if (ihl < 20 || len < eth_len + ihl + 8) {
+        return LDN_DIAG_TRUNCATED;
+    }
+    if (ip[9] != 17) {
+        return LDN_DIAG_NOT_UDP;
+    }
+    return LDN_DIAG_UDP;
+}
+
+const char *ldn_frame_diag_text(LdnFrameDiag d)
+{
+    switch (d) {
+    case LDN_DIAG_UDP:
+        return "IPv4/UDP, relayed";
+    case LDN_DIAG_TRUNCATED:
+        return "truncated: too short to contain the headers it claims";
+    case LDN_DIAG_NOT_IPV4:
+        return "ethertype 0x0800 but the payload is not an IPv4 header - this is "
+               "what an LDN-encrypted data frame would look like (see "
+               "DESIGN.md open question 13); if it repeats, the relay needs the "
+               "LDN data key before game traffic can pass";
+    case LDN_DIAG_NOT_UDP:
+        return "IPv4 but not UDP; the relay carries UDP only, and Pia does not "
+               "use anything else, so this is unexpected";
+    case LDN_DIAG_ARP:
+        return "ARP; consoles resolve each other over the air without us, so "
+               "this is only a problem if it was addressed to an emulator node";
+    case LDN_DIAG_IPV6:
+        return "IPv6, which the relay does not carry";
+    case LDN_DIAG_OTHER:
+    default:
+        return "an ethertype the relay does not carry";
+    }
+}
+
 LdnFrameKind ldn_classify_ap_frame(const void *buf, size_t len)
 {
     const uint8_t *p = buf;

@@ -38,6 +38,8 @@ static size_t wrap_eth(uint8_t *out, const uint8_t *dst, const uint8_t *src,
     return 14 + body_len;
 }
 
+static void test_diagnosis(void);
+
 int main(void)
 {
     uint8_t buf[64];
@@ -118,6 +120,60 @@ int main(void)
         assert(ldn_classify_ap_frame(buf, 20) == LDN_FRAME_CONTROL);
     }
 
+    test_diagnosis();
+
     printf("OK: AP frame classification (control / ethernet / 802.11 / drop)\n");
     return 0;
+}
+
+/*
+ * The diagnosis a dropped console frame gets. This is what a hardware session
+ * reads first, so each case must be distinguishable: "encrypted" and "ARP" and
+ * "TCP" mean three different things and only one of them needs code.
+ */
+static void test_diagnosis(void)
+{
+    uint8_t f[64];
+    memset(f, 0, sizeof(f));
+
+    /* A plain IPv4/UDP frame is relayable. */
+    f[12] = 0x08; f[13] = 0x00;
+    f[14] = 0x45;                 /* IPv4, 5 words */
+    f[14 + 9] = 17;               /* UDP */
+    f[14 + 2] = 0; f[14 + 3] = 28; /* total length */
+    assert(ldn_diagnose_ethernet(f, 14 + 20 + 8) == LDN_DIAG_UDP);
+
+    /* Ethertype 0x0800 but the nibble is not 4. This is the shape an
+     * LDN-encrypted data frame would take, and the text must say so. */
+    f[14] = 0x91;
+    assert(ldn_diagnose_ethernet(f, 14 + 20 + 8) == LDN_DIAG_NOT_IPV4);
+    assert(strstr(ldn_frame_diag_text(LDN_DIAG_NOT_IPV4), "encrypted") != NULL);
+
+    /* ARP and IPv6 are recognised individually, not lumped together. */
+    f[14] = 0x45;
+    f[12] = 0x08; f[13] = 0x06;
+    assert(ldn_diagnose_ethernet(f, 14 + 28) == LDN_DIAG_ARP);
+    f[12] = 0x86; f[13] = 0xDD;
+    assert(ldn_diagnose_ethernet(f, 14 + 40) == LDN_DIAG_IPV6);
+
+    /* IPv4 that is not UDP. */
+    f[12] = 0x08; f[13] = 0x00;
+    f[14 + 9] = 6; /* TCP */
+    assert(ldn_diagnose_ethernet(f, 14 + 20 + 20) == LDN_DIAG_NOT_UDP);
+
+    /* Truncation at each stage, and a mismatched IHL. */
+    assert(ldn_diagnose_ethernet(f, 10) == LDN_DIAG_TRUNCATED);
+    assert(ldn_diagnose_ethernet(f, 14 + 10) == LDN_DIAG_TRUNCATED);
+    f[14] = 0x46; /* 6 words = 24 bytes of header, but only 20 present */
+    f[14 + 9] = 17;
+    assert(ldn_diagnose_ethernet(f, 14 + 20 + 8) == LDN_DIAG_TRUNCATED);
+    f[14] = 0x44; /* IHL below the minimum of 5 words */
+    assert(ldn_diagnose_ethernet(f, 14 + 20 + 8) == LDN_DIAG_TRUNCATED);
+
+    /* Every diagnosis has text, so the log never prints a null. */
+    for (int d = 0; d <= LDN_DIAG_OTHER; d++) {
+        const char *t = ldn_frame_diag_text((LdnFrameDiag)d);
+        assert(t != NULL && t[0] != '\0');
+    }
+    printf("OK: dropped-frame diagnosis names encryption, ARP, IPv6 and TCP apart\n");
 }

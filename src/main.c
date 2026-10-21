@@ -138,9 +138,9 @@ static void warn_unparsed_console_frame(const uint8_t *eth, size_t len)
     g_unparsed_warned_at = now;
     uint16_t etype = len >= 14 ? rd_be16(eth + 12) : 0;
     unsigned proto = len >= 14 + 10 ? eth[14 + 9] : 0;
-    LOG_W("radio->guest: %zu-byte frame is not IPv4/UDP (ethertype %#06x, "
-          "ip proto %u); dropping it",
-          len, etype, proto);
+    LdnFrameDiag why = ldn_diagnose_ethernet(eth, len);
+    LOG_W("radio->guest: %zu-byte frame dropped (ethertype %#06x, ip proto %u): %s",
+          len, etype, proto, ldn_frame_diag_text(why));
 }
 
 static void deliver_to_guest(Bridge *b, const uint8_t *eth, size_t len)

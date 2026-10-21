@@ -245,6 +245,36 @@ typedef enum {
 
 LdnFrameKind ldn_classify_ap_frame(const void *buf, size_t len);
 
+/*
+ * Why a frame from a console could not be relayed.
+ *
+ * The relay only carries IPv4/UDP, which is what Eden's ProxyPacket and
+ * RyuLdn's ProxyData can express. Everything else has to be *named* at the
+ * point it is dropped, because the three candidates mean completely different
+ * things:
+ *
+ *   - an 0x0800 frame whose IPv4 version nibble is not 4 looks like LDN has
+ *     encrypted the data payload (open question 13: data_key is derived and
+ *     never used). If that is what is happening, nothing in this project can
+ *     relay game traffic until it is decrypted, and the log should say so
+ *     rather than "not IPv4/UDP".
+ *   - 0x0806/0x86DD is ARP or IPv6, which the relay cannot express but which
+ *     two consoles resolve between themselves over the air without us.
+ *   - IPv4 with a non-UDP protocol is TCP or ICMP, which Pia does not use.
+ */
+typedef enum {
+    LDN_DIAG_UDP = 0,      /* relayable */
+    LDN_DIAG_TRUNCATED,    /* too short to judge */
+    LDN_DIAG_NOT_IPV4,     /* 0x0800, but not an IPv4 header - suspect encryption */
+    LDN_DIAG_NOT_UDP,      /* IPv4, protocol != 17 */
+    LDN_DIAG_ARP,          /* 0x0806: resolved console-to-console over the air */
+    LDN_DIAG_IPV6,         /* 0x86DD: not relayed */
+    LDN_DIAG_OTHER,        /* some other ethertype */
+} LdnFrameDiag;
+
+LdnFrameDiag ldn_diagnose_ethernet(const void *eth, size_t len);
+const char *ldn_frame_diag_text(LdnFrameDiag d);
+
 int ldn_build_ldn_ethernet(uint8_t *out, size_t out_len, const uint8_t dst[6],
                            const uint8_t src[6], const void *body,
                            size_t body_len);
