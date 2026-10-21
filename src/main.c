@@ -428,7 +428,30 @@ static void on_access_point(RyuLdnSession *session, const uint8_t *payload, size
     }
 
     uint64_t title_id = guest->network.intent_id.local_communication_id;
-    uint16_t channel = guest->network.channel ? guest->network.channel : b->channel;
+    uint16_t requested_channel = guest->network.channel ? guest->network.channel : b->channel;
+
+    /*
+     * The advertisement goes out on whatever channel the radio is tuned to, so
+     * the channel written into it has to be that one. Advertising the channel
+     * the *game* asked for while transmitting on another one is the worst of
+     * both: the console tunes to the advertised channel and hears nothing.
+     *
+     * A radio only exists in live mode; with --radio-socket the harness decides,
+     * so the guest's request is all we have.
+     */
+    uint16_t channel = requested_channel;
+    {
+        const RadioConfig *rc = radio_config(b->radio);
+        if (rc && rc->channel && rc->channel != requested_channel) {
+            LOG_W("the guest asked for channel %u but the radio is on %u; "
+                  "advertising %u - pass --channel %u and set CHANNEL=%u for "
+                  "hostapd, or the network will be invisible to a console "
+                  "scanning %u",
+                  requested_channel, rc->channel, rc->channel, rc->channel,
+                  rc->channel, requested_channel);
+            channel = rc->channel;
+        }
+    }
     const char *username =
         guest->user.user_name[0] ? guest->user.user_name : "Player";
     uint16_t comm_version = guest->network.local_communication_version;
@@ -446,25 +469,28 @@ static void on_access_point(RyuLdnSession *session, const uint8_t *payload, size
                                      guest->network.node_count_max, passphrase,
                                      passphrase_len, username,
                                      comm_version) != 0) {
-            LOG_E("could not configure the LDN network from the guest's settings; "
-                  "a console trying to scan will not find it");
+            /*
+             * Deliberately a timeout, not a NetworkError: only None(0) and
+             * ConnectionRejected(202) are confirmed codes, and guessing a third
+             * makes the emulator misreport instead of waiting (DESIGN.md Q9).
+             * Say so, so the silence is explainable at 3 a.m.
+             */
+            LOG_E("could not configure the LDN network from the guest's settings "
+                  "(see the error above); the previous network is untouched and "
+                  "the guest's CreateNetwork will time out rather than get an "
+                  "invented error code");
             return;
         }
     }
     if (!b->host) {
-        LOG_E("could not start the LDN host (see the errors above); the guest's "
-              "CreateNetwork will time out");
+        LOG_E("could not start the LDN host (see the error above); the guest's "
+              "CreateNetwork will time out - there is no confirmed NetworkError "
+              "code for this, so a timeout is the honest answer (DESIGN.md Q9)");
         return;
     }
 
     b->title_id = title_id;
     b->channel = channel;
-
-    if (radio_config(b->radio) && radio_config(b->radio)->channel != channel) {
-        LOG_W("guest asked for channel %u but the radio is on %u; run "
-              "setup-ap.sh with CHANNEL=%u to match",
-              channel, radio_config(b->radio)->channel, channel);
-    }
 
     /* Mirror the guest's advertise data so both sides of the mesh agree. */
     host_set_app_data(b->host, guest->advertise_data, guest->advertise_data_size);

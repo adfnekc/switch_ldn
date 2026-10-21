@@ -82,6 +82,9 @@ int prodkeys_load(ProdKeys *keys, const char *path)
 
     char line[512];
     int lineno = 0, loaded = 0;
+    /* A master key from another key generation: present, but not the one the
+     * LDN derivation uses. Worth naming separately - see the error below. */
+    bool saw_other_generation = false;
     while (fgets(line, sizeof(line), f)) {
         lineno++;
 
@@ -107,6 +110,9 @@ int prodkeys_load(ProdKeys *keys, const char *path)
         size_t vlen = strlen(value);
         while (vlen && isspace((unsigned char)value[vlen - 1])) value[--vlen] = '\0';
 
+        if (strncmp(name, "master_key_", 11) == 0 && strcmp(name, "master_key_00") != 0) {
+            saw_other_generation = true;
+        }
         if (parse_key_line(keys, name, value) < 0) {
             LOG_W("prod.keys:%d: ignoring malformed entry '%s'", lineno, name);
         }
@@ -116,6 +122,19 @@ int prodkeys_load(ProdKeys *keys, const char *path)
     if (!prodkeys_ready(keys)) {
         LOG_E("%s is missing required keys (need master_key_00, "
               "aes_kek_generation_source, aes_key_generation_source)", path);
+        if (saw_other_generation && !keys->has_master_key_00) {
+            /*
+             * A file with master_key_01..0N but no master_key_00 fails here, and
+             * "missing keys" is a confusing thing to be told when the file
+             * visibly has master keys in it. Either the file was taken from a
+             * console on another key generation, or it was trimmed; in both
+             * cases the fix is a prod.keys that has master_key_00, not a
+             * different aes_*_generation_source.
+             */
+            LOG_E("%s has a master key from another key generation, but local "
+                  "wireless derives its advertisement key from master_key_00; "
+                  "use a prod.keys that contains master_key_00", path);
+        }
         return -1;
     }
 

@@ -130,6 +130,18 @@ static int host_configure(Host *host, uint64_t title_id, uint16_t channel,
 {
     const ProdKeys *prodkeys = host->pub.prodkeys;
 
+    /*
+     * Check this first. Everything below mutates the live network: it changes
+     * the title and channel, clears the station table, draws a new nonce and
+     * re-derives the keys. Failing the prod.keys test *after* that leaves a
+     * running network that no console can decrypt and that the guest was never
+     * told about - the guest just times out, on a network that still advertises.
+     */
+    if (!prodkeys_ready(prodkeys)) {
+        LOG_E("prod.keys incomplete; cannot build an encrypted LDN network");
+        return -1;
+    }
+
     host->pub.title_id = title_id;
     host->pub.channel = channel;
     host->pub.band = band;
@@ -175,11 +187,6 @@ static int host_configure(Host *host, uint64_t title_id, uint16_t channel,
 
     host->adv_expire_ms = 0;
     rng_fill(host->pub.nonce, LDN_NONCE_SIZE);
-
-    if (!prodkeys_ready(prodkeys)) {
-        LOG_E("prod.keys incomplete; cannot build an encrypted LDN network");
-        return -1;
-    }
 
     uint8_t session_info_raw[32];
     ldn_session_info_encode(&host->pub.session_info, session_info_raw);
