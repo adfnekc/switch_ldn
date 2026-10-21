@@ -77,9 +77,10 @@ Use **VirtualBox** (with the Extension Pack, needed for USB 2.0+) or **VMware
 Workstation**. **Do not use Hyper-V** - its USB "passthrough" is USB/IP again,
 which is the arrangement that just failed.
 
-1. Install a normal distro in the VM (Ubuntu 24.04 is fine). It must boot
-   **systemd**, because udev is what serves firmware to the kernel on the
-   fallback path.
+1. Install a normal, **current** distro in the VM - Ubuntu 24.04 or Debian 12.
+   It must boot **systemd**, because udev is what serves firmware to the kernel
+   on the fallback path. Do not pick RHEL/CentOS 7: see the box below, it
+   cannot be made to work without porting the driver by hand.
 2. VM settings -> USB -> enable the controller (try **xHCI / USB 3.0** first;
    EHCI passthrough is the flakier of the two) and add a filter for
    `0bda:8812` so the adapter attaches whenever it is plugged in.
@@ -98,6 +99,29 @@ which is the arrangement that just failed.
    `CONFIG_FW_LOADER_COMPRESS_ZSTD=y` handles that on its own, and if yours does
    not, `sudo zstd -d .../rtw8812a_fw.bin.zst -o .../rtw8812a_fw.bin` fixes it.
 4. Then continue at **Stage 1** below.
+
+#### Do not use a RHEL/CentOS 7 guest
+
+Measured, not guessed. CentOS 7.6's `3.10.0-957.el7` kernel reports
+`LINUX_VERSION_CODE` 3.10 but has **backported the 4.x cfg80211 API**, so no
+upstream `rtl8812au` branch matches it:
+
+| Branch | Result on 3.10.0-957 |
+|---|---|
+| `v5.6.4.2` (targets 5.x) | 31 errors: `IEEE80211_NUM_BANDS`, `sme_state`, `cfg80211_connect_bss`, ... |
+| `v5.3.4` | 18 errors after renaming `IEEE80211_BAND_*` to `NL80211_BAND_*`: `sme_state`, `STATION_INFO_*`, `cfg80211_ibss_joined`/`roamed` signatures |
+| `v4.3.21` (targets 3.x) | same 18-error family from the other direction |
+
+The remaining work is not renaming: `wdev->sme_state` was **removed** in 4.x and
+replaced by `wdev->conn`, so the connect/disconnect paths have to be rewritten,
+and `STATION_INFO_*` became a `BIT(NL80211_STA_INFO_*)` bitmap. That is a port,
+not a patch, on a platform nobody else runs.
+
+For reference, the two build-step obstacles that are mechanical and do get
+fixed this way: the Makefile's `-Wno-error=date-time` must be commented out
+(gcc 4.8 rejects it, and the kernel adds `-Werror` when gcc is 4.8), and
+`call_read_iter` is guarded on `< 4.11` but needs `>= 3.16` as well, since
+RHEL's 3.10 has no `read_iter`.
 
 Notes:
 
