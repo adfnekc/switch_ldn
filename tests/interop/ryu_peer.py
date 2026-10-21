@@ -151,6 +151,10 @@ if "--expect-proxy" in _sys.argv[1:]:
               "{} bytes".format(dlen))
     else:
         stage("ProxyData received from a real console", False, "none arrived")
+    # In this mode the answer is the point, so do not then sit in the hold loop
+    # forever - console-sim waits for this process to exit before it reads the
+    # verdict.
+    _sys.exit(0 if got is not None else 1)
 
 # Optionally hold the session open so a second peer (the fake console) has a
 # live LDN network to talk to. `make interop` relies on the default immediate

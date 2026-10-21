@@ -293,6 +293,22 @@ int ldn_build_auth_body(uint8_t *out, size_t out_len, const LdnAuthData *auth,
     return (int)need;
 }
 
+int ldn_build_ldn_ethernet(uint8_t *out, size_t out_len, const uint8_t dst[6],
+                           const uint8_t src[6], const void *body,
+                           size_t body_len)
+{
+    if (!out || !dst || !src || (!body && body_len) || out_len < 14 + body_len) {
+        return -1;
+    }
+    memcpy(out, dst, 6);
+    memcpy(out + 6, src, 6);
+    wr_be16(out + 12, ETH_P_LDN); /* ethertype is big-endian on the wire */
+    if (body_len) {
+        memcpy(out + 14, body, body_len);
+    }
+    return (int)(14 + body_len);
+}
+
 int ldn_build_auth_frame(uint8_t *out, size_t out_len, const uint8_t mac[6],
                          const uint8_t bssid[6], const LdnAuthData *auth,
                          size_t *payload_len)

@@ -255,6 +255,18 @@ class FakeConsole:
 
     # -- framing helpers -------------------------------------------------
 
+    def send_ldn_control(self, body):
+        """Send an LDN control frame the way the AP interface carries it.
+
+        A real console's authentication frame arrives as an 802.11 *data* frame,
+        which hostapd bridges onto the AP interface as an Ethernet frame with
+        ethertype 0x88B7. That is the shape the bridge reads (emit()'s
+        is_ldn_control path), so the console sends that too - otherwise
+        console-sim would be exercising a framing the hardware never produces.
+        """
+        frame = (self.ap_mac + self.mac + b"\x88\xb7" + body)
+        self.sock.sendto(frame, self.path)
+
     def send_frame(self, body, subtype_action=True):
         frame = build_80211(self.mac, self.ap_mac, subtype_action) + body
         self.sock.sendto(frame, self.path)
@@ -345,7 +357,7 @@ class FakeConsole:
             bytes.fromhex("00112233445566778899aabbccddeeff"),
             b"FakeConsole",
         )
-        self.send_frame(build_88b7(PACKET_AUTHENTICATION) + req)
+        self.send_ldn_control(build_88b7(PACKET_AUTHENTICATION) + req)
         stage("AuthenticationRequest sent", True, f"{len(req)}-byte header")
 
         deadline = time.monotonic() + 4.0
@@ -387,8 +399,10 @@ class FakeConsole:
         # (169.254.x.y); destination is the LDN IP it published for the guest.
         ip += bytes.fromhex("A9FE0301") + bytes.fromhex("0A720001")
         ip += udp
-        self.sock.sendto(build_80211(self.mac, self.ap_mac, subtype_action=False) + ip,
-                         self.path)
+        # Pia traffic reaches the AP interface as an Ethernet frame with
+        # ethertype 0x0800 - hostapd bridges it - so send that shape.
+        eth = self.ap_mac + self.mac + b"\x08\x00" + ip
+        self.sock.sendto(eth, self.path)
         stage("Pia frame sent upstream as a data frame", True,
               "{}-byte IP packet".format(len(ip)))
 

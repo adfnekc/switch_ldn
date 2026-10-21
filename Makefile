@@ -124,6 +124,9 @@ interop: build/bridge_harness build/room_peer tests/interop/prod.keys
 # network, and a fake console decrypts the advertisement, authenticates, and
 # sends Pia traffic. Needs no NIC and no root.
 # ---------------------------------------------------------------------------
+# Both halves must pass: the console's own stages AND the peer's ProxyData
+# check. Reading only the console's exit code let the peer's assertions fail
+# silently, which is exactly the "asserted something adjacent" trap.
 console-sim: $(BIN) tests/interop/prod.keys
 	@sock=/tmp/ldn-console.sock; rm -f $$sock $$sock.console; \
 	./$(BIN) --radio-socket $$sock --prodkeys tests/interop/prod.keys >build/console.log 2>&1 & bp=$$!; \
@@ -133,10 +136,14 @@ console-sim: $(BIN) tests/interop/prod.keys
 	sleep 2; \
 	echo "--- fake console ---"; \
 	python3 -u tests/interop/fake_console.py --socket $$sock --title-id 01006F8002320000; rc=$$?; \
-	sleep 4; \
 	echo "--- the emulator side of that frame ---"; \
-	cat build/console-ryu.log | grep -E "ProxyData|\\[PASS\\]|\\[FAIL\\]" || true; \
-	kill $$rp $$bp 2>/dev/null || true; wait $$rp $$bp 2>/dev/null || true; \
+	wait $$rp 2>/dev/null || true; \
+	grep -E "ProxyData|\\[PASS\\]|\\[FAIL\\]" build/console-ryu.log || true; \
+	kill $$bp 2>/dev/null || true; wait $$bp 2>/dev/null || true; \
 	rm -f $$sock $$sock.console; \
-	exit $$rc
+	if [ $$rc -ne 0 ]; then exit $$rc; fi; \
+	if grep -q "\\[FAIL\\]" build/console-ryu.log; then \
+	    echo "console-sim: the emulator-side check failed"; exit 1; fi; \
+	exit 0
+
 

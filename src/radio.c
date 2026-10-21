@@ -311,6 +311,26 @@ static bool is_ldn_action(const uint8_t *p, size_t len)
            b[2] == LDN_OUI_1 && b[3] == LDN_OUI_2 && b[4] == LDN_PROTOCOL_ID;
 }
 
+/*
+ * An Ethernet frame we know how to carry: IPv4/IPv6/ARP (Pia traffic) or LDN
+ * control. Only used to tell an Ethernet frame from an 802.11 one, and only
+ * after is_ldn_control() has already claimed the LDN case.
+ *
+ * Without this, pump_ap classified every non-LDN frame with get_fc(), which
+ * reads bytes 0..1 of an Ethernet frame - the destination MAC - as an 802.11
+ * frame control. Real Pia traffic from a console is an Ethernet frame here, so
+ * it was being dropped.
+ */
+static bool is_ethernet_payload(const uint8_t *p, size_t len)
+{
+    if (len < sizeof(struct ethhdr)) {
+        return false;
+    }
+    uint16_t etype = rd_be16(p + 12);
+    return etype == 0x0800 || etype == 0x86DD || etype == 0x0806 ||
+           etype == ETH_P_LDN;
+}
+
 static bool is_ldn_control(const uint8_t *p, size_t len)
 {
     if (len < sizeof(struct ethhdr) + 6) {
@@ -339,7 +359,17 @@ static bool is_ldn_control(const uint8_t *p, size_t len)
  * MAC against the AP's real MAC and parsed the LDN body at the 802.11 offset,
  * so the authentication handshake could never be reached.
  */
-static void emit(Radio *r, const uint8_t *frame, size_t len)
+/*
+ * `is_ethernet` is supplied by the caller, which already classified the frame.
+ *
+ * Deriving it here from the bytes was wrong twice over: an Ethernet LDN
+ * control frame has ethertype 0x88B7, which the old condition explicitly
+ * excluded, so it fell through to the 802.11 branch and every inbound
+ * authentication request was parsed at the wrong offsets. The caller always
+ * knows - pump_ap classifies with is_ldn_control(), the monitor and nl80211
+ * paths are always 802.11 - so let it say so.
+ */
+static void emit(Radio *r, const uint8_t *frame, size_t len, bool is_ethernet)
 {
     if (!r->rx_cb || len < 2) {
         return;
@@ -355,16 +385,15 @@ static void emit(Radio *r, const uint8_t *frame, size_t len)
     const uint8_t *src_mac, *dst_mac, *payload;
     size_t payload_len;
 
-    if (len >= sizeof(struct ethhdr) && rd_be16(frame + 12) != ETH_P_LDN) {
-        /* Probably an Ethernet frame; check the ethertype. */
-        uint16_t etype = rd_be16(frame + 12);
-        if (etype == 0x0800 || etype == 0x88DD || etype == 0x0806) {
-            dst_mac = frame;
-            src_mac = frame + 6;
-            payload = frame + sizeof(struct ethhdr);
-            payload_len = len - sizeof(struct ethhdr);
-            goto build;
+    if (is_ethernet) {
+        if (len < sizeof(struct ethhdr)) {
+            return;
         }
+        dst_mac = frame;
+        src_mac = frame + 6;
+        payload = frame + sizeof(struct ethhdr);
+        payload_len = len - sizeof(struct ethhdr);
+        goto build;
     }
 
     if (len >= IEEE80211_HDRLEN) {
@@ -452,7 +481,12 @@ static void pump_ap(Radio *r)
         }
         if (is_ldn_control(buf, (size_t)n)) {
             /* control frames come through the bridge as Ethernet frames */
-            emit(r, buf, (size_t)n);
+            emit(r, buf, (size_t)n, true);
+            continue;
+        }
+        if (is_ethernet_payload(buf, (size_t)n)) {
+            /* Pia traffic bridged out of hostapd as Ethernet. */
+            emit(r, buf, (size_t)n, true);
             continue;
         }
         /* otherwise it's an 802.11 frame from the AP VAP (auth request etc.) */
@@ -460,9 +494,9 @@ static void pump_ap(Radio *r)
         uint8_t type = (uint8_t)((fc >> 2) & 0x3);
         uint8_t subtype = (uint8_t)((fc >> 4) & 0xF);
         if (type == 0x00 && subtype == 0x0D) { /* action */
-            emit(r, buf, (size_t)n);
+            emit(r, buf, (size_t)n, false);
         } else if (type == 0x02) { /* data frame (shouldn't happen on AP) */
-            emit(r, buf, (size_t)n);
+            emit(r, buf, (size_t)n, false);
         }
     }
 }
@@ -472,7 +506,7 @@ static void pump_ap(Radio *r)
  * difference between an injected and a sniffed frame. */
 static void nl_frame_cb(const uint8_t *frame, size_t len, void *user)
 {
-    emit((Radio *)user, frame, len);
+    emit((Radio *)user, frame, len, false);
 }
 
 static void pump_monitor(Radio *r)
@@ -484,7 +518,7 @@ static void pump_monitor(Radio *r)
             return;
         }
         if (is_ldn_action(buf, (size_t)n)) {
-            emit(r, buf, (size_t)n);
+            emit(r, buf, (size_t)n, false);
         }
     }
 }
@@ -618,17 +652,18 @@ int radio_send_ldn_control(Radio *radio, const uint8_t dst_mac[6], const void *b
     if (!radio || !dst_mac || !body || len == 0) {
         return -1;
     }
-    /* Ethernet header: 6 + 6 + 2, then the LDN body. */
     if (len > 1500) {
         LOG_E("radio_send_ldn_control: %zu-byte body is too large", len);
         return -1;
     }
     uint8_t frame[14 + 1500];
-    memcpy(frame, dst_mac, 6);
-    memcpy(frame + 6, radio->cfg.mac, 6);
-    wr_be16(frame + 12, ETH_P_LDN);
-    memcpy(frame + 14, body, len);
-    return radio_send(radio, frame, 14 + len);
+    int n = ldn_build_ldn_ethernet(frame, sizeof(frame), dst_mac, radio->cfg.mac,
+                                   body, len);
+    if (n < 0) {
+        LOG_E("radio_send_ldn_control: cannot build the frame");
+        return -1;
+    }
+    return radio_send(radio, frame, (size_t)n);
 }
 
 int radio_send_action_frame(Radio *radio, const uint8_t *body, size_t len)

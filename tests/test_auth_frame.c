@@ -74,6 +74,27 @@ int main(void)
         assert(bn > 0);
         assert((size_t)bn == (size_t)n - IEEE80211_HDRLEN);
         assert(memcmp(body_only, body, (size_t)bn) == 0);
+
+        /*
+         * And the framing the AP interface actually carries: Ethernet with
+         * ethertype 0x88B7. Getting this wrong means the kernel sees bytes
+         * 12..13 of an 802.11 header as the ethertype, which is how the
+         * authentication response silently never reached a station.
+         */
+        uint8_t eth[14 + sizeof(body_only)];
+        uint8_t dst[6] = {0x02, 0x4A, 0x57, 0x53, 0x44, 0x99};
+        uint8_t src[6] = {0x02, 0x4A, 0x57, 0x53, 0x53, 0x4B};
+        int en = ldn_build_ldn_ethernet(eth, sizeof(eth), dst, src, body_only,
+                                        (size_t)bn);
+        assert(en == 14 + bn);
+        assert(memcmp(eth, dst, 6) == 0);      /* destination first */
+        assert(memcmp(eth + 6, src, 6) == 0);  /* then source */
+        assert(eth[12] == 0x88 && eth[13] == 0xB7);
+        assert(memcmp(eth + 14, body_only, (size_t)bn) == 0);
+
+        /* Too small a buffer must fail instead of truncating. */
+        assert(ldn_build_ldn_ethernet(eth, 13 + (size_t)bn, dst, src, body_only,
+                                      (size_t)bn) == -1);
     }
 
     /* --- body prefix: OUI, packet type 258, pad --- */

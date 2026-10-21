@@ -212,6 +212,21 @@ int ldn_build_auth_frame(uint8_t *out, size_t out_len, const uint8_t mac[6],
 int ldn_build_auth_body(uint8_t *out, size_t out_len, const LdnAuthData *auth,
                         size_t *payload_len);
 
+/*
+ * Wrap an LDN body (OUI, packet type, pad, LDN header, payload) in an Ethernet
+ * frame with ethertype 0x88B7.
+ *
+ * This is the framing an AP interface uses for LDN control frames: the kernel
+ * and hostapd turn it into an 802.11 data frame addressed to dst. Writing the
+ * 802.11 form to that interface instead gives the kernel an Ethernet frame
+ * whose bytes 12..13 happen to be part of addr2.
+ *
+ * Returns the total frame length, or -1 if it does not fit.
+ */
+int ldn_build_ldn_ethernet(uint8_t *out, size_t out_len, const uint8_t dst[6],
+                           const uint8_t src[6], const void *body,
+                           size_t body_len);
+
 int ldn_parse_auth_frame(const uint8_t *frame, size_t frame_len, LdnAuthData *auth);
 
 /* Channel helper: encodes (band << 10) | channel as the wiki describes. */
