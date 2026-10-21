@@ -258,6 +258,7 @@ make test
 | `tests/test_advert_nonce.c` | The 4-byte advertisement nonce: changes per emission, advances by exactly one, carries on wrap, survives a reconfigure |
 | `tests/test_frame_classify.c` | How a frame arriving on the AP interface is classified: Ethernet `0x88B7` + the `00:22:aa` OUI is LDN control, Ethernet IPv4/IPv6/ARP is game traffic, raw 802.11 action/data is the harness path, everything else is a logged drop. Keys on the OUI and packet type, not on the ethertype — a control frame is still control when its ethertype says something else. This is the regression test for the bug that made every inbound authentication request get parsed as 802.11. It also covers `ldn_diagnose_ethernet()`, which decides *why* a dropped frame was dropped: encrypted-looking payload, ARP, IPv6, TCP, truncation or an unknown ethertype, each with its own wording. |
 | `tests/test_prodkeys_load.c` | prod.keys parsing: a complete file loads, `master_key_01` **without** `master_key_00` is a hard failure (a zero master key would yield an advertisement that looks fine here and that no console can read), junk and unrelated keys are skipped, hex is case-insensitive, a short value is rejected rather than zero-extended, and a failed load leaves nothing half-loaded. |
+| `tests/test_multi_station.c` | Seven consoles at once, driven through the real authentication path: no two stations share a slot or an IPv4, every address is in `169.254.0.0/16`, the advertisement's node list tracks the table (and needs a `host_tick()` to be rebuilt, which is what the 100 ms timer does), an eighth station is refused rather than wrapped, a departure frees its slot **and its address** for the next console, a disconnect from an unknown MAC changes nothing, and the join/leave events still pair up. Slot numbers are `1..capacity` because slot 0 is the emulator guest, which is easy to get wrong in a test. |
 | `tests/test_host_watchdog.c` | Station bookkeeping on join (`last_seen_ms` / `joined_ms`), that the default 30 s timeout is preserved, and that a timed-out station is evicted and produces a `HOST_EVENT_STATION_LEFT` carrying the station's identity (mac, IP, username). The identity snapshot matters: the slot is cleared before the event is pushed, so a transport that re-read the table would find nothing and silently drop every departure. |
 
 Every expected byte string is transcribed from Eden's own encoders.
@@ -354,7 +355,7 @@ Python package which implements exactly this path.
 
 ## Status
 
-p0 is complete and builds clean under `-Wall -Wextra`. 11 test suites
+p0 is complete and builds clean under `-Wall -Wextra`. 12 test suites
 pass, plus `make interop` and `make console-sim`, all without radio hardware,
 root, or a wireless NIC.
 

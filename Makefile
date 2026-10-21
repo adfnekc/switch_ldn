@@ -79,6 +79,9 @@ test: $(TEST_OBJS) build/host.o
 	$(CC) $(CFLAGS) $(CPPFLAGS) -Isrc -o build/test_prodkeys_load tests/test_prodkeys_load.c \
 	    build/crypto.o build/util.o $(LDLIBS)
 	./build/test_prodkeys_load
+	$(CC) $(CFLAGS) $(CPPFLAGS) -Isrc -o build/test_multi_station tests/test_multi_station.c \
+	    build/host.o $(TEST_OBJS) $(LDLIBS)
+	./build/test_multi_station
 
 # ---------------------------------------------------------------------------
 # CLI smoke test, also without radio hardware.

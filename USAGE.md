@@ -137,7 +137,7 @@ sudo ./switch_ldn --ap-iface wlan0 \
 
 ```bash
 ./switch_ldn --selfcheck lo    # 射频探测：报告 mode / ifindex
-make test                      # 11 套 socket 级测试，不碰射频
+make test                      # 12 套 socket 级测试，不碰射频
 make interop                   # 用真实 RyuLdn / Room peer 打桥（radio 被 stub）
 make console-sim               # 假真机打真二进制：完整 console → 模拟器 链路
 ```

@@ -92,7 +92,7 @@ the emulator's game creates its network.
 
 ```bash
 make               # needs libssl-dev, libzstd-dev, libnl-3-dev, libnl-genl-3-dev
-make test          # 11 suites, all socket-level, no hardware required
+make test          # 12 suites, all socket-level, no hardware required
 make check         # CLI smoke test
 make interop       # real RyuLdn + Room peers against the bridge (no radio)
 make console-sim   # a fake console against the real binary (no radio, no root)
@@ -181,7 +181,7 @@ is the authority and the others should point at it.
 
 ## Status
 
-Builds clean under `-Wall -Wextra`; 11 test suites pass, plus `make interop`.
+Builds clean under `-Wall -Wextra`; 12 test suites pass, plus `make interop`.
 
 Validated without hardware: prod.keys parsing, key derivation, advertisement
 frame construction, RyuLdn wire layout and handshake, Room wire layout and fake
