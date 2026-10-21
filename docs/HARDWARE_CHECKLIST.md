@@ -11,8 +11,9 @@ Prerequisites, all of which you must have before stage 1:
   is the first thing to rule out because everything else is wasted effort if it
   fails.
 - a `RTL8812AU`. The aircrack-ng out-of-tree driver is what this checklist
-  assumes; the mainline `rtw88_8812au` module may be enough and is worth trying
-  first (see below).
+  assumes. The mainline `rtw88_8812au` module is worth trying first, but it only
+  exists from Linux 6.13, and its frame-injection support is not what stage 4
+  needs, so plan on building the out-of-tree one.
 - root on the same machine
 - a real Switch **with local wireless play** in a supported game
 - `prod.keys` from that same console (the bridge needs `--prodkeys`; nothing
@@ -77,10 +78,16 @@ Use **VirtualBox** (with the Extension Pack, needed for USB 2.0+) or **VMware
 Workstation**. **Do not use Hyper-V** - its USB "passthrough" is USB/IP again,
 which is the arrangement that just failed.
 
-1. Install a normal, **current** distro in the VM - Ubuntu 24.04 or Debian 12.
-   It must boot **systemd**, because udev is what serves firmware to the kernel
-   on the fallback path. Do not pick RHEL/CentOS 7: see the box below, it
-   cannot be made to work without porting the driver by hand.
+1. Install a normal, **current** distro in the VM - Debian 13, Ubuntu 24.04 or
+   similar. It must boot **systemd**, because udev is what serves firmware to
+   the kernel on the fallback path. Do not pick RHEL/CentOS 7: see the box
+   below, it cannot be made to work without porting the driver by hand.
+
+   Do not expect the mainline driver yet. `rtw88_8812au` only exists from
+   **Linux 6.13** onwards (the patches landed in late 2024), so every LTS up to
+   Ubuntu 24.04 (6.8), Debian 12 (6.1) and Debian 13 (6.12) has to build the
+   aircrack-ng driver. Check with
+   `modinfo -F filename rtw88_8812au` before assuming otherwise.
 2. VM settings -> USB -> enable the controller (try **xHCI / USB 3.0** first;
    EHCI passthrough is the flakier of the two) and add a filter for
    `0bda:8812` so the adapter attaches whenever it is plugged in.
@@ -89,15 +96,35 @@ which is the arrangement that just failed.
    ```console
    $ lsusb | grep 8812
    Bus 001 Device 003: ID 0bda:8812 Realtek ... RTL8812AU
+   ```
+
+   If your kernel is 6.13 or newer, try the mainline module first - it costs one
+   command:
+
+   ```console
    $ sudo modprobe rtw88_8812au && ip -brief link
    ... wlan0 ...
    ```
 
    If no `wlan0` appears, `dmesg | grep -i rtw88` - and check the firmware is
    actually present and *uncompressed* (`ls /lib/firmware/rtw88/rtw8812a_fw.bin`).
-   Ubuntu ships those as `.zst`; a distro kernel with
+   Debian and Ubuntu ship those as `.zst`; a kernel with
    `CONFIG_FW_LOADER_COMPRESS_ZSTD=y` handles that on its own, and if yours does
    not, `sudo zstd -d .../rtw8812a_fw.bin.zst -o .../rtw8812a_fw.bin` fixes it.
+
+   Otherwise build the out-of-tree driver - this is the expected path on any
+   LTS, and the one stage 4 needs anyway:
+
+   ```console
+   $ sudo apt install build-essential linux-headers-$(uname -r) git
+   $ git clone --depth 1 -b v5.13.6 https://github.com/aircrack-ng/rtl8812au
+   $ cd rtl8812au && make && sudo make install && sudo modprobe 88XXau
+   $ ip -brief link            # wlan0
+   ```
+
+   (`make install` runs `depmod`; the module is named `88XXau`, not
+   `rtl8812au`.) If the build fails, the error usually names a kernel API that
+   moved - pick the oldest branch that knows your kernel rather than patching.
 4. Then continue at **Stage 1** below.
 
 #### Do not use a RHEL/CentOS 7 guest
