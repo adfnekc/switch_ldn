@@ -15,7 +15,7 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential libssl-dev libzstd-dev python3 ripgrep
+          sudo apt-get install -y build-essential libssl-dev libzstd-dev libnl-3-dev libnl-genl-3-dev python3 ripgrep
 
       - name: Build
         run: make

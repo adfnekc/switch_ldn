@@ -2,13 +2,15 @@ CC      ?= gcc
 CFLAGS  ?= -O2 -g -std=gnu11 -Wall -Wextra -Wno-unused-parameter
 # OpenSSL 3 deprecates the low-level AES API; the EVP layer needs more plumbing for now.
 CFLAGS  += -Wno-deprecated-declarations
+# nl80211 lives under libnl3's own include prefix on Debian/Ubuntu.
+CFLAGS  += -I/usr/include/libnl3
 # Track header dependencies. Without this, editing radio.h or ldn.h rebuilds
 # nothing: the old object files stay, the link still succeeds, and the result is
 # a binary mixing two struct layouts. That is how a change to RadioFrame
 # produced a bridge that ran but silently stopped dispatching console frames.
 CFLAGS  += -MMD -MP
 CPPFLAGS = -D_GNU_SOURCE
-LDLIBS   = -lcrypto -lzstd
+LDLIBS   = -lcrypto -lzstd -lnl-3 -lnl-genl-3
 
 SRCDIR := src
 OBJDIR := build
@@ -16,10 +18,10 @@ BIN    := switch_ldn
 
 SRCS := $(wildcard $(SRCDIR)/*.c)
 OBJS := $(patsubst $(SRCDIR)/%.c,$(OBJDIR)/%.o,$(SRCS))
-TEST_OBJS := build/crypto.o build/ldn.o build/ryuldn.o build/room.o build/radio.o build/util.o
+TEST_OBJS := build/crypto.o build/ldn.o build/ryuldn.o build/room.o build/radio.o build/nl80211.o build/util.o
 # host.o lives outside TEST_OBJS because only the host-side tests need it, but
 # `make test` must still build it or those links fail from a clean tree.
-BRIDGE_OBJS := build/crypto.o build/ldn.o build/ryuldn.o build/room.o build/radio.o build/util.o build/host.o
+BRIDGE_OBJS := build/crypto.o build/ldn.o build/ryuldn.o build/room.o build/radio.o build/nl80211.o build/util.o build/host.o
 
 .PHONY: all clean check test interop console-sim
 

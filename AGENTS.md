@@ -65,4 +65,5 @@ per-game lookup would only be a second source of truth that can disagree.
 
 ## Build deps
 
-`libssl-dev` and `libzstd-dev`.
+`libssl-dev`, `libzstd-dev`, `libnl-3-dev` and `libnl-genl-3-dev`
+(the last two for nl80211 management-frame injection).

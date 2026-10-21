@@ -91,7 +91,7 @@ the emulator's game creates its network.
 ## Build & test
 
 ```bash
-make               # needs libssl-dev and libzstd-dev
+make               # needs libssl-dev, libzstd-dev, libnl-3-dev, libnl-genl-3-dev
 make test          # 9 suites, all socket-level, no hardware required
 make check         # CLI smoke test
 make interop       # real RyuLdn + Room peers against the bridge (no radio)

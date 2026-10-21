@@ -18,6 +18,7 @@
 #include <unistd.h>
 
 #include "common.h"
+#include "nl80211.h"
 
 typedef struct Radio {
     RadioConfig cfg;
@@ -29,6 +30,13 @@ typedef struct Radio {
      * interfaces above. The peer is whoever sent the first datagram, and it
      * stays the console until the bridge is closed. */
     bool socket_backend;
+
+    /*
+     * nl80211 handle for action-frame injection on the AP interface. Present
+     * when no monitor interface was configured: the RTL8812AU driver wedges the
+     * kernel if asked for a monitor VIF, but it does implement .mgmt_tx.
+     */
+    struct Nl80211 *nl;
     bool have_peer;
     bool peer_warned;
     struct sockaddr_un peer;
@@ -459,6 +467,14 @@ static void pump_ap(Radio *r)
     }
 }
 
+/* An action frame received over nl80211 goes through the same normaliser as
+ * every other inbound frame, so host.c and the relay cannot tell the
+ * difference between an injected and a sniffed frame. */
+static void nl_frame_cb(const uint8_t *frame, size_t len, void *user)
+{
+    emit((Radio *)user, frame, len);
+}
+
 static void pump_monitor(Radio *r)
 {
     for (int i = 0; i < 16; i++) {
@@ -518,6 +534,23 @@ Radio *radio_open(const RadioConfig *cfg, radio_rx_cb rx_cb, void *user)
         if (r->mon_fd >= 0) {
             LOG_I("monitor interface %s ready (ifindex %d)", cfg->mon_iface, idx);
         }
+    } else {
+        /*
+         * No monitor interface: inject the advertisements through nl80211 on
+         * the AP interface instead. This is the path the RTL8812AU needs,
+         * because asking that driver for a monitor VIF wedges the kernel.
+         * Failure is not fatal - data traffic still flows - but without it no
+         * console will ever see the network, so say so loudly.
+         */
+        r->nl = nl80211_open(cfg->ap_iface);
+        if (!r->nl) {
+            LOG_E("no monitor interface and nl80211 is unavailable: the LDN "
+                  "advertisement cannot be transmitted, so no console will "
+                  "find this network");
+        } else {
+            uint8_t oui[3] = {LDN_OUI_0, LDN_OUI_1, LDN_OUI_2};
+            nl80211_register_action(r->nl, oui, LDN_PROTOCOL_ID);
+        }
     }
 
     int idx;
@@ -535,6 +568,10 @@ void radio_close(Radio *radio)
 {
     if (!radio) {
         return;
+    }
+    if (radio->nl) {
+        nl80211_close(radio->nl);
+        radio->nl = NULL;
     }
     if (radio->ap_fd >= 0) {
         close(radio->ap_fd);
@@ -598,8 +635,25 @@ int radio_send_action_frame(Radio *radio, const uint8_t *body, size_t len)
         return 0;
     }
 
+    if (radio->nl) {
+        /*
+         * The channel has to be described in full (see nl80211.h); 20 MHz with
+         * no HT is what LDN uses and what hostapd was started with.
+         */
+        uint32_t mhz = radio->cfg.band == 5
+                           ? (uint32_t)(5000 + 5 * radio->cfg.channel)
+                           : (uint32_t)(2407 + 5 * radio->cfg.channel);
+        int rc = nl80211_mgmt_tx(radio->nl, body, len, mhz,
+                                 0 /* NL80211_CHAN_WIDTH_20_NOHT */, mhz);
+        if (rc != 0) {
+            return -1;
+        }
+        return 0;
+    }
+
     if (radio->mon_fd < 0) {
-        LOG_E("no monitor interface configured for action frame injection");
+        LOG_E("no monitor interface and no nl80211 handle: cannot inject "
+              "action frames");
         return -1;
     }
     struct sockaddr_ll sll;
@@ -633,13 +687,20 @@ void radio_poll(Radio *radio, int timeout_ms)
      */
     bool have_monitor = radio->mon_fd >= 0 && !radio->socket_backend;
 
-    struct pollfd fds[2];
+    struct pollfd fds[3];
     fds[0].fd = radio->ap_fd;
     fds[0].events = POLLIN;
     size_t n = 1;
     if (have_monitor) {
         fds[n].fd = radio->mon_fd;
         fds[n].events = POLLIN;
+        n++;
+    }
+    int nl_at = -1;
+    if (radio->nl) {
+        fds[n].fd = nl80211_fd(radio->nl);
+        fds[n].events = POLLIN;
+        nl_at = (int)n;
         n++;
     }
 
@@ -649,6 +710,9 @@ void radio_poll(Radio *radio, int timeout_ms)
     }
     if (have_monitor && (fds[1].revents & POLLIN)) {
         pump_monitor(radio);
+    }
+    if (nl_at >= 0 && (fds[nl_at].revents & POLLIN)) {
+        nl80211_drain(radio->nl, nl_frame_cb, radio);
     }
     if (fds[0].revents & POLLIN) {
         pump_ap(radio);

@@ -47,7 +47,12 @@ typedef struct {
     /* Interface that hostapd manages (usually a VAP of the NIC or the NIC
      * itself). LDN data and control frames are read/written here. */
     char ap_iface[IFNAMSIZ];
-    /* Interface in monitor mode used to inject action frames. */
+    /*
+     * Optional interface in monitor mode, used to inject action frames the old
+     * way. Leave it empty on the RTL8812AU: creating a monitor VIF wedges that
+     * driver, so radio_open() falls back to nl80211 .mgmt_tx on ap_iface
+     * instead. See src/nl80211.h.
+     */
     char mon_iface[IFNAMSIZ];
 
     /* Optional socket radio backend. When set, radio_open() binds a Unix
